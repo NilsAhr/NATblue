@@ -4,7 +4,8 @@ cache
 scenario
 bluesky/resources/grib
 bluesky/resources/netcdf
-data
+data/grib
+data/NetCDF
 
 # Potentially locally-copied BADA installation
 bluesky/resources/performance/BADA/*
