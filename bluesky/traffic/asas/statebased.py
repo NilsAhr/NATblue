@@ -100,9 +100,38 @@ class StateBased(ConflictDetection):
         swlos = (dist < rpz) * (np.abs(dalt) < hpz)
         lospairs = [(ownship.id[i], ownship.id[j]) for i, j in zip(*np.where(swlos))]
 
+        # --------------------------------------------------------------------------
+        # Calculate minimum vertical distance during the conflict window
+        # --------------------------------------------------------------------------
+        # For each conflict pair, compute dalt at tinconf and toutconf
+        dalt_entry = dalt + dvs * tinconf
+        dalt_exit = dalt + dvs * toutconf
+
+        # Time when vertical separation is zero (if it occurs within the window)
+        t_cross = -dalt / dvs
+        # Mask for t_cross within [tinconf, toutconf]
+        cross_in_window = (t_cross >= tinconf) & (t_cross <= toutconf)
+
+        # Minimum vertical distance: check entry, exit, and crossing (if in window)
+        min_dalt = np.where(
+            cross_in_window,
+            0.0,
+            np.minimum(np.abs(dalt_entry), np.abs(dalt_exit))
+        )
+
+        # Only keep values for conflicting pairs
+        dalt = min_dalt[swconfl]
+
+
         return confpairs, lospairs, inconf, tcpamax, \
             qdr[swconfl], dist[swconfl], np.sqrt(dcpa2[swconfl]), \
-                tcpa[swconfl], tinconf[swconfl]
+                tcpa[swconfl], tinconf[swconfl], dalt
+    
+        # qdr: bearing from ownship to intruder
+        # dist: distance from ownship to intruder
+        # np.sqrt(dcpa2[swconfl]): minimum horizontal distance (DCPA) at CPA
+        # tcpa[swconfl]: time to CPA
+        # tinconf[swconfl]: conflict entry time
 
 
 try:
