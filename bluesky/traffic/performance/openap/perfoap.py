@@ -64,10 +64,11 @@ class OpenAP(PerfBase):
         # check fixwing or rotor, default to fixwing
         if actype in self.coeff.actypes_rotor:
             self.lifttype[-n:] = coeff.LIFT_ROTOR
-            self.mass[-n:] = 0.5 * (
-                self.coeff.acs_rotor[actype]["oew"]
-                + self.coeff.acs_rotor[actype]["mtow"]
-            )
+            #self.mass[-n:] = 0.5 * (
+            #    self.coeff.acs_rotor[actype]["oew"]
+            #    + self.coeff.acs_rotor[actype]["mtow"]
+            #)
+            self.mass[-n:] = 0.95* self.coeff.acs_fixwing[actype]["mtow"]  # initial mass set to 95% of MTOW
             self.engnum[-n:] = int(self.coeff.acs_rotor[actype]["n_engines"])
             self.engpower[-n:] = self.coeff.acs_rotor[actype]["engines"][0][1]
 
@@ -89,10 +90,11 @@ class OpenAP(PerfBase):
             self.lifttype[-n:] = coeff.LIFT_FIXWING
 
             self.Sref[-n:] = self.coeff.acs_fixwing[actype]["wing"]['area']
-            self.mass[-n:] = 0.5 * (
-                self.coeff.acs_fixwing[actype]["oew"]
-                + self.coeff.acs_fixwing[actype]["mtow"]
-            )
+            #self.mass[-n:] = 0.5 * (
+            #    self.coeff.acs_fixwing[actype]["oew"]
+            #    + self.coeff.acs_fixwing[actype]["mtow"]
+            #)
+            self.mass[-n:] = 0.95* self.coeff.acs_fixwing[actype]["mtow"]  # initial mass set to 95% of MTOW
 
             self.engnum[-n:] = int(self.coeff.acs_fixwing[actype]["engine"]["number"])
 
@@ -236,6 +238,9 @@ class OpenAP(PerfBase):
             + self.ff_coeff_c[idx_fixwing]
         )
 
+        # ----- update mass -----
+        self.mass[idx_fixwing] -= self.fuelflow[idx_fixwing] * dt
+
         # ----- update max acceleration ----
         self.axmax = self.calc_axmax()
 
@@ -255,7 +260,9 @@ class OpenAP(PerfBase):
         # print(bs.traf.id)
         # print(self.phase)
         # print(self.thrust.astype(int))
-        # print(np.round(self.fuelflow, 2))
+        #if int(bs.sim.simt) % 10 == 0:  # Print every 10 seconds exactly
+        #    print(np.round(self.fuelflow, 2))
+        #    print(self.mass)
         # print(self.drag.astype(int))
         # print(self.currentlimits())
         # print()

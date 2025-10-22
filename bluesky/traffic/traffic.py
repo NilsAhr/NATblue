@@ -26,7 +26,7 @@ from .trafficgroups import TrafficGroups
 from .performance.perfbase import PerfBase
 
 # Register settings defaults
-bs.settings.set_variable_defaults(performance_model='openap', asas_dt=1.0)
+bs.settings.set_variable_defaults(performance_model='bada', asas_dt=1.0)
 
 # if bs.settings.performance_model == 'bada':
 #     try:

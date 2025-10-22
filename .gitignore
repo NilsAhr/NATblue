@@ -16,6 +16,9 @@
 # virtual environment
 venv
 
+# scenario
+*.scn
+
 # PyBuilder
 target/
 

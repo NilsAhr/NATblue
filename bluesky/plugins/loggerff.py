@@ -11,15 +11,16 @@ from bluesky.tools import datalog, geo
 from bluesky.tools.aero import ft,kts,nm,fpm
 from bluesky.tools.position import txt2pos
 import bluesky as bs
+from bluesky.traffic.performance.perfbase import PerfBase
 
 flstheader = \
     'simt,' + \
     'callsign,' + \
     'ac_type,' + \
     'flighttime,' + \
+    'currentmass,' + \
     'distanceflown,' + \
     'totalfuel,' + \
-    'init_mass,' + \
     'latitude,' + \
     'longitude,' + \
     'spawntime,' + \
@@ -28,6 +29,7 @@ flstheader = \
     'workdone,' + \
     'positivefuelflow,' + \
     'rawfuelflow,' + \
+    'thrust,' + \
     'altitude,' + \
     'tas,' + \
     'vs,' + \
@@ -137,6 +139,9 @@ class Loggerff(Entity):
         self.toutconf = {}    # Track conflict end times for each conflict
         self.sim_name = stack.get_scenname()
 
+        # Performance model access
+        self.perf     = PerfBase()
+
         # The FLST & CONF LOGGERFF
         self.flst = datalog.crelog('FLSTLOG_LOGGERFF', None, flstheader)
         self.conflog = datalog.crelog('CONFLOG_LOGGERFF', None, confheader)
@@ -147,7 +152,6 @@ class Loggerff(Entity):
             self.create_time = np.array([])
             self.total_fuel = np.array([]) # total fuel [kg]
             self.last_update_time = np.array([]) # last update time [s] for integration
-            self.initial_mass = np.array([]) # initial mass [kg] at spawn time
 
     def reset(self):
         super().reset()
@@ -169,6 +173,9 @@ class Loggerff(Entity):
 
         self.intrusion_occurred = {}
 
+        # reset performance model
+        self.perf.reset()
+
         # severity parameters
         self.dcpa = {}
         self.dalt = {}
@@ -188,31 +195,6 @@ class Loggerff(Entity):
         # Initialize fuel tracking for new aircraft
         self.total_fuel[-n:] = 0.0
         self.last_update_time[-n:] = sim.simt
-        
-        # Set initial mass as 85% of MTOW for long-haul flights
-        #for i in range(-n, 0):  # Last n aircraft
-            #actype = traf.type[i].upper()
-            
-            # Calculate 85% of MTOW for long-haul operations
-            #mtow = self._get_bada_mtow(actype)
-            #operating_mass = mtow * 0.85 if not np.isnan(mtow) else np.nan
-            
-            # Override the performance model mass and store initial mass
-            #if hasattr(traf.perf, 'mass') and len(traf.perf.mass) > abs(i) and not np.isnan(operating_mass):
-                #traf.perf.mass[i] = operating_mass
-            
-            #self.initial_mass[i] = operating_mass
-
-    #def _get_bada_mtow(self, actype):
-    #    """Get MTOW from BADA performance model"""
-    #    try:
-    #        # BADA stores MTOW in m_max (in tons)
-    #        if hasattr(traf.perf, 'coeff') and hasattr(traf.perf.coeff, 'm_max'):
-    #            return traf.perf.coeff.m_max * 1000.0  # Convert tons to kg
-    #        else:
-    #            return np.nan
-    #    except (AttributeError, KeyError, TypeError):
-    #        return np.nan
 
     def delete(self, idx):
         # Clean up when aircraft are deleted (called automatically by BlueSky)
@@ -236,38 +218,7 @@ class Loggerff(Entity):
         5. Log everything with consistent array sizes
         """
         n_current = len(traf.id)
-    
-        # Mass validation and correction (moved from BADA)
-        if hasattr(traf.perf, 'mass') and len(traf.perf.mass) > 0:
-            current_masses = traf.perf.mass[:n_current]
-            invalid_mass = (current_masses <= 0) | (current_masses > 1e6) | np.isnan(current_masses)
-            
-            if np.any(invalid_mass):
-                invalid_indices = np.where(invalid_mass)[0]
                 
-                # Only warn for aircraft we haven't warned about before
-                new_warnings = 0
-                for idx in invalid_indices:
-                    if idx < len(traf.id):
-                        callsign = traf.id[idx]
-                        if callsign not in self.mass_warning_callsigns:
-                            actype = traf.type[idx] if idx < len(traf.type) else "Unknown"
-                            mass_value = current_masses[idx]
-                            print(f"LOGGERFF Warning: Aircraft {callsign} ({actype}) has invalid mass: {mass_value}")
-                            self.mass_warning_callsigns.add(callsign)
-                            new_warnings += 1
-                
-                # Reset invalid masses to A333 reference mass
-                try:
-                    from bluesky.traffic.performance.bada import coeff_bada
-                    a333_ref_mass = coeff_bada.getCoefficients('A333')[1].m_ref * 1000.0
-                    traf.perf.mass[:n_current] = np.where(invalid_mass, a333_ref_mass, current_masses)
-                    
-                    if new_warnings > 0:
-                        print(f"LOGGERFF: Reset {new_warnings} invalid aircraft masses to A333 reference ({a333_ref_mass:.0f} kg)")
-                except Exception as e:
-                    print(f"LOGGERFF: Could not reset invalid masses: {e}")
-            
         #########################################################
         ################## 1. AIRCRAFT DELETION ################
         #########################################################
@@ -368,7 +319,18 @@ class Loggerff(Entity):
         try:
             raw_fuelflow = traf.perf.fuelflow[:n_current]
             positive_fuelflow = np.maximum(0, raw_fuelflow)
+
+            # Thrust
+            thrust = np.zeros(n_current)
+            if hasattr(traf.perf, 'thrust') and len(traf.perf.thrust) >= n_current:
+                thrust = traf.perf.thrust[:n_current]
             
+            # Add this debug code for mass
+            current_mass = np.zeros(n_current)
+            if hasattr(traf.perf, 'mass') and len(traf.perf.mass) >= n_current:
+                current_mass = traf.perf.mass[:n_current]
+                #print(f"Time: {sim.simt:.1f}, Mass in logger: {current_mass[0]:.2f}, Fuelflow: {raw_fuelflow[0]:.5f}")
+
             # Integrate fuel consumption
             fuel_consumed_this_step = positive_fuelflow * dt_array
             self.total_fuel[:n_current] += fuel_consumed_this_step
@@ -380,6 +342,7 @@ class Loggerff(Entity):
             # Fallback if fuel flow not available
             raw_fuelflow = np.full(n_current, np.nan)
             positive_fuelflow = np.full(n_current, 0.0)
+            thrust = np.full(n_current, np.nan)
         
         
         #########################################################
@@ -501,34 +464,15 @@ class Loggerff(Entity):
         n_active_conflicts = len(traf.cd.confpairs_unique)
         n_active_intrusions = len(traf.cd.lospairs_unique)
 
-        # Check if any aircraft need their initial mass set
-        #need_initial_mass = self.initial_mass[:n_current] == -999.0
-        #if np.any(need_initial_mass):
-        #    try:
-        #        current_mass = traf.perf.mass[:n_current]
-        #        # For aircraft that don't have initial mass set, use current mass
-        #        self.initial_mass[:n_current] = np.where(
-        #            need_initial_mass, 
-        #            current_mass, 
-        #            self.initial_mass[:n_current]
-        #        )
-        #    except (AttributeError, IndexError):
-                # If we can't get mass, set to NaN
-        #        self.initial_mass[:n_current] = np.where(
-        #            need_initial_mass, 
-        #            np.nan, 
-        #            self.initial_mass[:n_current]
-        #        )
-
         # Ensure ALL arrays have exactly n_current elements and log
         if n_current > 0:
             self.flst.log(
                 traf.id[:n_current],                               # [n_current]
                 traf.type[:n_current],                             # [n_current]
-                (sim.simt - self.create_time[:n_current]),         # [n_current]
+                (sim.simt - self.create_time[:n_current]),
+                current_mass,                                       # [n_current]
                 (traf.distflown[:n_current] / nm),                 # [n_current]
                 self.total_fuel[:n_current],                       # [n_current]
-                self.initial_mass[:n_current],                     # [n_current]
                 traf.lat[:n_current],                              # [n_current]
                 traf.lon[:n_current],                              # [n_current]
                 self.create_time[:n_current],                      # [n_current]
@@ -536,7 +480,8 @@ class Loggerff(Entity):
                 self.distance3D[:n_current],                       # [n_current]
                 (traf.work[:n_current] * 1e-6),                    # [n_current]
                 positive_fuelflow,                                 # [n_current]
-                raw_fuelflow,                                      # [n_current]
+                raw_fuelflow,
+                thrust,                                            # [n_current]
                 (traf.alt[:n_current] / ft),                       # [n_current]
                 (traf.tas[:n_current] / kts),                      # [n_current]
                 (traf.vs[:n_current] / fpm),                       # [n_current]

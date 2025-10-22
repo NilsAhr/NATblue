@@ -197,7 +197,8 @@ class BADA(PerfBase):
 
         # Initial aircraft mass is currently reference mass.
         # BADA 3.12 also supports masses between 1.2*mmin and mmax
-        self.mass[-n:]      = coeff.m_ref * 1000.0
+        #self.mass[-n:]      = coeff.m_ref * 1000.0
+        self.mass[-n:]      = coeff.m_max * 1000.0 * 0.95  # 95% of MTOW as initial mass
         self.mmin[-n:]      = coeff.m_min * 1000.0
         self.mmax[-n:]      = coeff.m_max * 1000.0
 
@@ -537,7 +538,10 @@ class BADA(PerfBase):
 
         # update mass
         self.mass -= self.fuelflow * dt # Use fuelflow in kg/min
-
+        
+        # testing if mass is decreasing
+        #if int(bs.sim.simt) % 10 == 0:  # Print every 10 seconds exactly
+            #print(f"Time: {bs.sim.simt:.1f}, Aircraft: {bs.traf.id[0]}, Mass: {self.mass[0]:.2f}, Fuelflow: {self.fuelflow[0]:.5f}, dt: {dt}")
 
 
         # for aircraft on the runway and taxiways we need to know, whether they
