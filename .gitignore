@@ -19,6 +19,9 @@ venv
 # scenario
 *.scn
 
+# weather
+data/
+
 # PyBuilder
 target/
 

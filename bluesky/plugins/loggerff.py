@@ -34,10 +34,6 @@ flstheader = \
     'tas,' + \
     'vs,' + \
     'heading,' + \
-    'originlat,' + \
-    'originlon,' + \
-    'destinationlat,' + \
-    'destinationlon,' + \
     'asasactive,' + \
     'pilotalt,' + \
     'pilottas,' + \
@@ -140,7 +136,7 @@ class Loggerff(Entity):
         self.sim_name = stack.get_scenname()
 
         # Performance model access
-        self.perf     = PerfBase()
+        #self.perf     = PerfBase()
 
         # The FLST & CONF LOGGERFF
         self.flst = datalog.crelog('FLSTLOG_LOGGERFF', None, flstheader)
@@ -174,7 +170,7 @@ class Loggerff(Entity):
         self.intrusion_occurred = {}
 
         # reset performance model
-        self.perf.reset()
+        #self.perf.reset()
 
         # severity parameters
         self.dcpa = {}
@@ -288,7 +284,7 @@ class Loggerff(Entity):
                     print(f"END of simulation: NAME NOT DEFINED at: {sim.simt}seconds = {sim.simt/3600}hours")
                 else:
                     print(f"END of simulation: {self.sim_name} at: {sim.simt}seconds = {sim.simt/3600}hours")
-                stack.stack('hold')
+                stack.stack('reset')
                 return  # EXIT EARLY - no aircraft to process
         
         # If no aircraft, don't do any calculations
@@ -303,7 +299,7 @@ class Loggerff(Entity):
         n_current = traf.ntraf
         
         # Calculate time since last update for each aircraft
-        dt_array = sim.simt - self.last_update_time[:n_current]
+        dt_array = 1.0
 
         # Update distance tracking
         if n_current > 0:
@@ -485,11 +481,7 @@ class Loggerff(Entity):
                 (traf.alt[:n_current] / ft),                       # [n_current]
                 (traf.tas[:n_current] / kts),                      # [n_current]
                 (traf.vs[:n_current] / fpm),                       # [n_current]
-                traf.hdg[:n_current],                              # [n_current]
-                [""] * n_current,                                  # [n_current] - Origin Lat
-                [""] * n_current,                                  # [n_current] - Origin Lon
-                [""] * n_current,                                  # [n_current] - Destination Lat
-                [""] * n_current,                                  # [n_current] - Destination Lon
+                traf.hdg[:n_current],                              # [n_current]                          # [n_current] - Destination Lon
                 traf.cr.active[:n_current],                        # [n_current]
                 (traf.aporasas.alt[:n_current] / ft),              # [n_current]
                 (traf.aporasas.tas[:n_current] / kts),             # [n_current]
