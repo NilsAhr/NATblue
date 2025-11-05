@@ -292,7 +292,7 @@ class Loggerff(Entity):
             return
 
         #########################################################
-        ################## 3. UPDATE TRACKING ARRAYS ##########
+        ################# 3. UPDATE TRACKING ARRAYS ##########
         #########################################################
         
         # Ensure all our tracking arrays match current aircraft count
