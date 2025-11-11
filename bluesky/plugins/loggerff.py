@@ -321,7 +321,17 @@ class Loggerff(Entity):
             if hasattr(traf.perf, 'thrust') and len(traf.perf.thrust) >= n_current:
                 thrust = traf.perf.thrust[:n_current]
             
-            # Add this debug code for mass
+            # At the top of your file, add the phase mapping
+            PHASE_NAMES = {0: 'None', 1: 'TO', 2: 'IC', 3: 'CR', 4: 'AP', 5: 'LD', 6: 'GD'}
+
+            # Flight Phase
+            #flight_phase = np.zeros(n_current, dtype=int)
+            #if hasattr(traf.perf, 'phase') and len(traf.perf.phase) >= n_current:
+            #    flight_phase_nums = traf.perf.phase[:n_current].astype(int)
+                # Convert numbers to phase names
+            #    flight_phase = np.array([PHASE_NAMES.get(int(p), 'Unknown') for p in flight_phase_nums])
+
+            # Current mass
             current_mass = np.zeros(n_current)
             if hasattr(traf.perf, 'mass') and len(traf.perf.mass) >= n_current:
                 current_mass = traf.perf.mass[:n_current]
@@ -339,6 +349,7 @@ class Loggerff(Entity):
             raw_fuelflow = np.full(n_current, np.nan)
             positive_fuelflow = np.full(n_current, 0.0)
             thrust = np.full(n_current, np.nan)
+            #flight_phase = np.full(n_current, -1, dtype=int) # -1 indicates unknown phase
         
         
         #########################################################
@@ -478,6 +489,7 @@ class Loggerff(Entity):
                 positive_fuelflow,                                 # [n_current]
                 raw_fuelflow,
                 thrust,                                            # [n_current]
+                #flight_phase,                                      # [n_current]
                 (traf.alt[:n_current] / ft),                       # [n_current]
                 (traf.tas[:n_current] / kts),                      # [n_current]
                 (traf.vs[:n_current] / fpm),                       # [n_current]
