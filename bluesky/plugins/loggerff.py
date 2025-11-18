@@ -8,7 +8,7 @@ import numpy as np
 from bluesky import core, stack, traf, sim, navdb  #settings, scr, tools
 from bluesky.core import Entity
 from bluesky.tools import datalog, geo
-from bluesky.tools.aero import ft,kts,nm,fpm
+from bluesky.tools.aero import ft,kts,nm,fpm, vtas2cas, vtas2mach
 from bluesky.tools.position import txt2pos
 import bluesky as bs
 from bluesky.traffic.performance.perfbase import PerfBase
@@ -32,6 +32,9 @@ flstheader = \
     'thrust,' + \
     'altitude,' + \
     'tas,' + \
+    'gs,' + \
+    'cas,' + \
+    'mach,' + \
     'vs,' + \
     'heading,' + \
     'asasactive,' + \
@@ -40,7 +43,24 @@ flstheader = \
     'pilothdg,' + \
     'pilotvs,' + \
     'n_active_conflicts,' + \
-    'n_active_intrusions' + '\n'
+    'n_active_intrusions,' + \
+    'gsnorth,' + \
+    'gseast,' + \
+    'windnorth,' + \
+    'windeast,' + \
+    'headwind,' + \
+    'crosswind,' + \
+    'pilotcas,' + \
+    'pilotmach,' + \
+    'selalt,' + \
+    'selvs,' + \
+    'swlnav,' + \
+    'swvnav,' + \
+    'swvnavspd,' + \
+    'swats,' + \
+    'throttle,' + \
+    'Temp,' + \
+    'rho' + '\n'
 
 confheader = \
     'simt[s],' + \
@@ -292,7 +312,7 @@ class Loggerff(Entity):
             return
 
         #########################################################
-        ################# 3. UPDATE TRACKING ARRAYS ##########
+        ################## 3. UPDATE TRACKING ARRAYS ##########
         #########################################################
         
         # Ensure all our tracking arrays match current aircraft count
@@ -321,17 +341,7 @@ class Loggerff(Entity):
             if hasattr(traf.perf, 'thrust') and len(traf.perf.thrust) >= n_current:
                 thrust = traf.perf.thrust[:n_current]
             
-            # At the top of your file, add the phase mapping
-            PHASE_NAMES = {0: 'None', 1: 'TO', 2: 'IC', 3: 'CR', 4: 'AP', 5: 'LD', 6: 'GD'}
-
-            # Flight Phase
-            #flight_phase = np.zeros(n_current, dtype=int)
-            #if hasattr(traf.perf, 'phase') and len(traf.perf.phase) >= n_current:
-            #    flight_phase_nums = traf.perf.phase[:n_current].astype(int)
-                # Convert numbers to phase names
-            #    flight_phase = np.array([PHASE_NAMES.get(int(p), 'Unknown') for p in flight_phase_nums])
-
-            # Current mass
+            # Add this debug code for mass
             current_mass = np.zeros(n_current)
             if hasattr(traf.perf, 'mass') and len(traf.perf.mass) >= n_current:
                 current_mass = traf.perf.mass[:n_current]
@@ -349,7 +359,6 @@ class Loggerff(Entity):
             raw_fuelflow = np.full(n_current, np.nan)
             positive_fuelflow = np.full(n_current, 0.0)
             thrust = np.full(n_current, np.nan)
-            #flight_phase = np.full(n_current, -1, dtype=int) # -1 indicates unknown phase
         
         
         #########################################################
@@ -471,6 +480,33 @@ class Loggerff(Entity):
         n_active_conflicts = len(traf.cd.confpairs_unique)
         n_active_intrusions = len(traf.cd.lospairs_unique)
 
+        # Precompute derived debug signals
+        # Track and wind to headwind/xwind in m/s
+        trk_rad = np.radians(traf.trk[:n_current])
+        wn, we = traf.windnorth[:n_current], traf.windeast[:n_current]
+        headwind = -(wn * np.cos(trk_rad) + we * np.sin(trk_rad))
+        crosswind = (-wn * np.sin(trk_rad) + we * np.cos(trk_rad))
+
+        # Commanded speed regime from pilottas
+        pilot_tas = traf.aporasas.tas[:n_current]  # [m/s]
+        pilot_cas_kn = vtas2cas(pilot_tas, traf.alt[:n_current]) / kts
+        pilot_mach = vtas2mach(pilot_tas, traf.alt[:n_current])
+
+        # Autopilot/ASAS selected targets
+        selalt_ft = traf.aporasas.alt[:n_current] / ft
+        selvs_fpm = traf.aporasas.vs[:n_current] / fpm
+
+        # Mode flags & throttle
+        swlnav = traf.swlnav[:n_current]
+        swvnav = traf.swvnav[:n_current]
+        swvnavspd = traf.swvnavspd[:n_current]
+        swats = traf.swats[:n_current] if len(traf.swats) >= n_current else np.zeros(n_current, dtype=bool)
+        throttle = traf.thr[:n_current] if len(traf.thr) >= n_current else np.full(n_current, -999.0)
+
+        # Atmosphere (already maintained in traffic)
+        Temp = traf.Temp[:n_current]
+        rho = traf.rho[:n_current]
+
         # Ensure ALL arrays have exactly n_current elements and log
         if n_current > 0:
             self.flst.log(
@@ -489,9 +525,11 @@ class Loggerff(Entity):
                 positive_fuelflow,                                 # [n_current]
                 raw_fuelflow,
                 thrust,                                            # [n_current]
-                #flight_phase,                                      # [n_current]
                 (traf.alt[:n_current] / ft),                       # [n_current]
                 (traf.tas[:n_current] / kts),                      # [n_current]
+                (traf.gs[:n_current] / kts),                       # [n_current]
+                (traf.cas[:n_current] / kts),                       # [n_current]
+                traf.M[:n_current],                                   # [n_current]
                 (traf.vs[:n_current] / fpm),                       # [n_current]
                 traf.hdg[:n_current],                              # [n_current]                          # [n_current] - Destination Lon
                 traf.cr.active[:n_current],                        # [n_current]
@@ -500,7 +538,24 @@ class Loggerff(Entity):
                 traf.aporasas.hdg[:n_current],                     # [n_current]
                 (traf.aporasas.vs[:n_current] / fpm),              # [n_current]
                 n_active_conflicts,                                # Scalar
-                n_active_intrusions                                # Scalar
+                n_active_intrusions,                                # Scalar
+                (traf.gsnorth[:n_current] / kts),
+                (traf.gseast[:n_current] / kts),
+                (traf.windnorth[:n_current] / kts),
+                (traf.windeast[:n_current] / kts),
+                (headwind / kts),
+                (crosswind / kts),
+                pilot_cas_kn,
+                pilot_mach,
+                selalt_ft,
+                selvs_fpm,
+                swlnav.astype(int),
+                swvnav.astype(int),
+                swvnavspd.astype(int),
+                swats.astype(int),
+                throttle,
+                Temp,
+                rho
             )
             
             
