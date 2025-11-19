@@ -59,7 +59,7 @@ flstheader = \
     'swvnavspd,' + \
     'swats,' + \
     'throttle,' + \
-    'Temp,' + \
+    'temp,' + \
     'rho' + '\n'
 
 confheader = \
