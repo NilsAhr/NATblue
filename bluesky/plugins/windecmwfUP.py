@@ -1,5 +1,5 @@
 """
-plugin with update function in 3h intervals
+plugin with update function in 1h intervals
 ERA5 data was migrated to CDS completely https://cds.climate.copernicus.eu
 
 - you need an CDS / ECMWF account to retrieve data!!!
@@ -54,7 +54,7 @@ class WindECMWFUP(WindSim):
 
         # Switch for periodic loading of new GFS data
         self.autoload = False
-        self.just_loaded = False
+        #self.just_loaded = False
         
     def fetch_nc(self, year, month, day):
         """
@@ -197,8 +197,7 @@ class WindECMWFUP(WindSim):
         #self.hour = hour or bs.sim.utc.hour
         self.hour = hour if hour is not None else bs.sim.utc.hour  # <-- Only override if hour is not provided
 
-        # round hour to 3 hours
-        # self.hour  = round(self.hour/3) * 3
+        stack.echo(f'XXXX-Simulation UTC time: {bs.sim.utc.year}-{bs.sim.utc.month:02d}-{bs.sim.utc.day:02d} {bs.sim.utc.hour:02d}:00')
         
         if self.hour == 24:
             ymd0 = "%04d%02d%02d" % (self.year, self.month, self.day)
@@ -238,7 +237,7 @@ class WindECMWFUP(WindSim):
 
         self.addpointvne(lat, lon, vnorth, veast, windalt)        
 
-        self.just_loaded = True  # Mark that data was just loaded
+        #self.just_loaded = True  # Mark that data was just loaded
         self.autoload = True  # Enable autoload for next update
         return True, "Wind field updated in area [%d, %d], [%d, %d]. " \
             % (self.lat0, self.lat1, self.lon0, self.lon1) \
@@ -248,34 +247,50 @@ class WindECMWFUP(WindSim):
     @timed_function(name='WINDECMWFUP', dt=3600) #1h = 3600, 2h = 7200, 3h = 10800,  4h = 14400, 5h = 18000, 6h = 21600, 8h = 28800
     def update(self):
         if self.autoload:
-            if self.just_loaded:
-                self.just_loaded = False
-                return  # Skip the first update after manual load
+            #if self.just_loaded:
+            #    self.just_loaded = False
+            #    return  # Skip the first update after manual load
             stack.echo("updating windfield")
-            # Increment the hour by to get the next timestep
-            self.hour += 1
             
-            # Check if the hour exceeds 24, and adjust the date if needed
-            if self.hour >= 24:
-                self.hour = 0
-                current_date = datetime.date(self.year, self.month, self.day)
-                next_date = current_date + datetime.timedelta(days=1)
-                self.year = next_date.year
-                self.month = next_date.month
-                self.day = next_date.day
+            # Sync to simulation time instead of incrementing
+            self.year = bs.sim.utc.year
+            self.month = bs.sim.utc.month
+            self.day = bs.sim.utc.day
+            self.hour = bs.sim.utc.hour
 
-            # **Only reload data if date changed**
-            if self.hour == 0:
+            stack.echo(f"Simulation time: {self.year}-{self.month:02d}-{self.day:02d} {self.hour:02d}:00")
+            
+            # Only reload NetCDF if the date changed    
+            ymd_now = f"{self.year:04d}{self.month:02d}{self.day:02d}"
+            if not hasattr(self, "netcdf_date") or self.netcdf_date != ymd_now:
                 self.netcdf = self.fetch_nc(self.year, self.month, self.day)
 
-            info = f"Current wind data hour: {self.hour:02d}:00"
-            stack.echo(info)
-            # Load the wind data for the next time step for defined coordinates
+            stack.echo(f"Updating wind field to {self.year}-{self.month:02d}-{self.day:02d} {self.hour:02d}:00")
             _, txt = self.loadwind(self.lat0, self.lon0, self.lat1, self.lon1,
-                                   self.year, self.month, self.day, self.hour)
+                                self.year, self.month, self.day, self.hour)
+            stack.echo(txt)
 
-            stack.echo("%s" % txt)
-            stack.echo(f"Wind field updated: {self.year}-{self.month}-{self.day} {self.hour}:00")
+            # Check if the hour exceeds 24, and adjust the date if needed
+            #if self.hour >= 24:
+            #    self.hour = 0
+            #    current_date = datetime.date(self.year, self.month, self.day)
+            #    next_date = current_date + datetime.timedelta(days=1)
+            #    self.year = next_date.year
+            #    self.month = next_date.month
+            #    self.day = next_date.day
+
+            # **Only reload data if date changed**
+            #if self.hour == 0:
+            #    self.netcdf = self.fetch_nc(self.year, self.month, self.day)
+
+            #info = f"Current wind data hour: {self.hour:02d}:00"
+            #stack.echo(info)
+            # Load the wind data for the next time step for defined coordinates
+            #_, txt = self.loadwind(self.lat0, self.lon0, self.lat1, self.lon1,
+            #                       self.year, self.month, self.day, self.hour)
+
+            #stack.echo("%s" % txt)
+            #stack.echo(f"Wind field updated: {self.year}-{self.month}-{self.day} {self.hour}:00")
             
             """
             # **Reuse extracted wind data**
