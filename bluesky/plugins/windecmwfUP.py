@@ -197,7 +197,7 @@ class WindECMWFUP(WindSim):
         #self.hour = hour or bs.sim.utc.hour
         self.hour = hour if hour is not None else bs.sim.utc.hour  # <-- Only override if hour is not provided
 
-        stack.echo(f'XXXX-Simulation UTC time: {bs.sim.utc.year}-{bs.sim.utc.month:02d}-{bs.sim.utc.day:02d} {bs.sim.utc.hour:02d}:00')
+        #stack.echo(f'XXXX-Simulation UTC time: {bs.sim.utc.year}-{bs.sim.utc.month:02d}-{bs.sim.utc.day:02d} {bs.sim.utc.hour:02d}:00')
         
         if self.hour == 24:
             ymd0 = "%04d%02d%02d" % (self.year, self.month, self.day)
@@ -250,7 +250,7 @@ class WindECMWFUP(WindSim):
             #if self.just_loaded:
             #    self.just_loaded = False
             #    return  # Skip the first update after manual load
-            stack.echo("updating windfield")
+            #stack.echo("updating windfield")
             
             # Sync to simulation time instead of incrementing
             self.year = bs.sim.utc.year
@@ -258,7 +258,7 @@ class WindECMWFUP(WindSim):
             self.day = bs.sim.utc.day
             self.hour = bs.sim.utc.hour
 
-            stack.echo(f"Simulation time: {self.year}-{self.month:02d}-{self.day:02d} {self.hour:02d}:00")
+            #stack.echo(f"Simulation time: {self.year}-{self.month:02d}-{self.day:02d} {self.hour:02d}:00")
             
             # Only reload NetCDF if the date changed    
             ymd_now = f"{self.year:04d}{self.month:02d}{self.day:02d}"
