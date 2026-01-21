@@ -15,7 +15,7 @@ from bluesky.traffic.performance.perfbase import PerfBase
 
 flstheader = \
     'simt,' + \
-    'callsign,' + \
+    'flightid,' + \
     'ac_type,' + \
     'flighttime,' + \
     'currentmass,' + \
@@ -127,7 +127,7 @@ class Loggerff(Entity):
         self.duration = {}              #dict for duration values
         self.d = 10                     #distance parameter for deleting aircraft automatically 
 
-        self.mass_warning_callsigns = set()  # Track which aircraft IDs we've warned about
+        self.mass_warning_flightids = set()  # Track which aircraft IDs we've warned about
 
         # basic conflict parameters
         self.init_lat1 = {}
@@ -173,7 +173,7 @@ class Loggerff(Entity):
         super().reset()
         self.duration = {}
 
-        self.mass_warning_callsigns = set()  # Reset mass warning tracking
+        self.mass_warning_flightids = set()  # Reset mass warning tracking
 
         #basic conflict parameters
         self.init_lat1 = {}
@@ -218,11 +218,11 @@ class Loggerff(Entity):
         
         # Clean up mass warning tracking for deleted aircraft
         if idx < len(traf.id):
-            deleted_callsign = traf.id[idx]
-            self.mass_warning_callsigns.discard(deleted_callsign)
+            deleted_flightid = traf.id[idx]
+            self.mass_warning_flightids.discard(deleted_flightid)
             
             # Optional: Log cleanup for debugging
-            # print(f"LOGGERFF: Cleaned up tracking for deleted aircraft: {deleted_callsign}")
+            # print(f"LOGGERFF: Cleaned up tracking for deleted aircraft: {deleted_flightid}")
 
     @core.timed_function(name='LOGGERFF', dt=1.0)
     def update(self, dt):
@@ -510,54 +510,53 @@ class Loggerff(Entity):
         # Ensure ALL arrays have exactly n_current elements and log
         if n_current > 0:
             self.flst.log(
-                traf.id[:n_current],                               # [n_current]
-                traf.type[:n_current],                             # [n_current]
-                (sim.simt - self.create_time[:n_current]),
-                current_mass,                                       # [n_current]
-                (traf.distflown[:n_current] / nm),                 # [n_current]
-                self.total_fuel[:n_current],                       # [n_current]
-                traf.lat[:n_current],                              # [n_current]
-                traf.lon[:n_current],                              # [n_current]
-                self.create_time[:n_current],                      # [n_current]
-                self.distance2D[:n_current],                       # [n_current]
-                self.distance3D[:n_current],                       # [n_current]
-                (traf.work[:n_current] * 1e-6),                    # [n_current]
-                positive_fuelflow,                                 # [n_current]
-                raw_fuelflow,
-                thrust,                                            # [n_current]
-                (traf.alt[:n_current] / ft),                       # [n_current]
-                (traf.tas[:n_current] / kts),                      # [n_current]
-                (traf.gs[:n_current] / kts),                       # [n_current]
-                (traf.cas[:n_current] / kts),                       # [n_current]
-                traf.M[:n_current],                                   # [n_current]
-                (traf.vs[:n_current] / fpm),                       # [n_current]
-                traf.hdg[:n_current],                              # [n_current]                          # [n_current] - Destination Lon
-                traf.cr.active[:n_current],                        # [n_current]
-                (traf.aporasas.alt[:n_current] / ft),              # [n_current]
-                (traf.aporasas.tas[:n_current] / kts),             # [n_current]
-                traf.aporasas.hdg[:n_current],                     # [n_current]
-                (traf.aporasas.vs[:n_current] / fpm),              # [n_current]
-                n_active_conflicts,                                # Scalar
-                n_active_intrusions,                                # Scalar
-                (traf.gsnorth[:n_current] / kts),
-                (traf.gseast[:n_current] / kts),
-                (traf.windnorth[:n_current] / kts),
-                (traf.windeast[:n_current] / kts),
-                (headwind / kts),
-                (crosswind / kts),
-                pilot_cas_kn,
-                pilot_mach,
-                selalt_ft,
-                selvs_fpm,
-                swlnav.astype(int),
-                swvnav.astype(int),
-                swvnavspd.astype(int),
-                swats.astype(int),
-                throttle,
-                Temp,
-                rho
-            )
-            
+                traf.id[:n_current],                               # flightid [-]
+                traf.type[:n_current],                             # ac_type [-]
+                (sim.simt - self.create_time[:n_current]),         # flighttime [s]
+                current_mass,                                      # currentmass [kg]
+                (traf.distflown[:n_current] / nm),                 # distanceflown [nm]
+                self.total_fuel[:n_current],                       # totalfuel [kg]
+                traf.lat[:n_current],                              # latitude [deg]
+                traf.lon[:n_current],                              # longitude [deg]
+                self.create_time[:n_current],                      # spawntime [s]
+                self.distance2D[:n_current],                       # actualdistance2D [m]
+                self.distance3D[:n_current],                       # actualdistance3D [m]
+                (traf.work[:n_current] * 1e-6),                    # workdone [MJ]
+                positive_fuelflow,                                 # positivefuelflow [kg/s]
+                raw_fuelflow,                                      # rawfuelflow [kg/s]
+                thrust,                                            # thrust [N]
+                (traf.alt[:n_current] / ft),                       # altitude [ft]
+                (traf.tas[:n_current] / kts),                      # tas [kts]
+                (traf.gs[:n_current] / kts),                       # gs [kts]
+                (traf.cas[:n_current] / kts),                      # cas [kts]
+                traf.M[:n_current],                                # mach [-]
+                (traf.vs[:n_current] / fpm),                       # vs [fpm]
+                traf.hdg[:n_current],                              # heading [deg]
+                traf.cr.active[:n_current],                        # asasactive [bool/int]
+                (traf.aporasas.alt[:n_current] / ft),              # pilotalt [ft]
+                (traf.aporasas.tas[:n_current] / kts),             # pilottas [kts]
+                traf.aporasas.hdg[:n_current],                     # pilothdg [deg]
+                (traf.aporasas.vs[:n_current] / fpm),              # pilotvs [fpm]
+                n_active_conflicts,                                # n_active_conflicts [-]
+                n_active_intrusions,                               # n_active_intrusions [-]
+                (traf.gsnorth[:n_current] / kts),                  # gsnorth [kts]
+                (traf.gseast[:n_current] / kts),                   # gseast [kts]
+                (traf.windnorth[:n_current] / kts),                # windnorth [kts]
+                (traf.windeast[:n_current] / kts),                 # windeast [kts]
+                (headwind / kts),                                  # headwind [kts]
+                (crosswind / kts),                                 # crosswind [kts]
+                pilot_cas_kn,                                      # pilotcas [kts]
+                pilot_mach,                                        # pilotmach [-]
+                selalt_ft,                                         # selalt [ft]
+                selvs_fpm,                                         # selvs [fpm]
+                swlnav.astype(int),                                # swlnav [0/1]
+                swvnav.astype(int),                                # swvnav [0/1]
+                swvnavspd.astype(int),                             # swvnavspd [0/1]
+                swats.astype(int),                                 # swats [0/1]
+                throttle,                                          # throttle [-]
+                Temp,                                              # temp [K]
+                rho                                                # rho [kg/m³]
+            )    
             
     def start_log(self):
         print (f"LOGGERFF: FLST and CONF loggerff started: {self.sim_name}")
