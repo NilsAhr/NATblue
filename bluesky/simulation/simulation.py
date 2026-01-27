@@ -1,4 +1,5 @@
 ''' BlueSky simulation control object. '''
+import platform
 import time
 import datetime
 import signal
@@ -74,6 +75,9 @@ class Simulation(Base):
         # is received
         signal.signal(signal.SIGINT, lambda *args: self.quit())
         signal.signal(signal.SIGTERM, lambda *args: self.quit())
+        if platform.system() == 'Windows':
+            signal.signal(getattr(signal, 'SIGBREAK'), lambda *args: self.quit())
+
 
         while self.state != bs.END:
             # Process timers
@@ -249,7 +253,7 @@ class Simulation(Base):
         # send to server and clear stack
         self.reset()
         try:
-            scentime, scencmd = zip(*[tc for tc in simstack.readscn(fname)])
+            scentime, scencmd = zip(*[tc for tc in simstack.readscn(fname, sort=False)])
             bs.net.send(b'BATCH', (scentime, scencmd), bs.net.server_id)
         except FileNotFoundError:
             return False, f'BATCH: File not found: {fname}'
