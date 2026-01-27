@@ -13,6 +13,9 @@
 # Sphinx documentation
 /docs/_build/
 
+# Nils scnearios
+/scenario/Nils/*
+
 # virtual environment
 venv
 

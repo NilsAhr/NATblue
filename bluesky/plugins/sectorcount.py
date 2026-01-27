@@ -18,6 +18,7 @@ def init_plugin():
     # Register a sector count logger
     global logger
     logger = datalog.crelog('OCCUPANCYLOG', None, 'Sector count log')
+    logger.start()  # Ensure the log file is opened for writing
 
     # Configuration parameters
     config = {
