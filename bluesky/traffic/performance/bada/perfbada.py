@@ -1,7 +1,7 @@
 """ BlueSky aircraft performance calculations using BADA 3.xx."""
 import numpy as np
 import bluesky as bs
-from bluesky.tools.aero import kts, ft, g0, vtas2cas, vcas2tas
+from bluesky.tools.aero import kts, ft, fpm, g0, vtas2cas, vcas2tas
 from bluesky.traffic.performance.perfbase import PerfBase
 from bluesky.traffic.performance.legacy.performance import esf, phases, calclimits, PHASE
 from bluesky import settings
@@ -373,6 +373,17 @@ class BADA(PerfBase):
         descent = np.array(delalt<-epsalt)
         lvl = np.array(np.abs(delalt)<0.0001)*1
 
+        # Cruise climb detection: shallow climb/descent treated as level for fuel flow
+        # Threshold: vertical speed < 500 fpm (2.54 m/s) is considered "cruise climb"
+        # This allows continuous cruise climb profiles to use cruise fuel flow
+        cruise_climb_vs_threshold = 500. * fpm  # [m/s] - adjustable threshold
+        shallow_climb = np.logical_and(climb, np.abs(bs.traf.vs) < cruise_climb_vs_threshold)
+        shallow_descent = np.logical_and(descent, np.abs(bs.traf.vs) < cruise_climb_vs_threshold)
+        # For fuel flow: treat shallow climb/descent as level flight
+        lvl_for_fuel = np.logical_or(lvl, np.logical_or(shallow_climb, shallow_descent)) * 1
+        # Steep climb: only climbs with VS >= threshold use nominal fuel flow
+        steep_climb = np.logical_and(climb, np.abs(bs.traf.vs) >= cruise_climb_vs_threshold)
+
         # energy share factor
         delspd = bs.traf.aporasas.tas - bs.traf.tas
         selmach = bs.traf.selspd < 2.0
@@ -513,12 +524,13 @@ class BADA(PerfBase):
         # initial climb
         ffic = fnom*(self.phase==PHASE['IC'])/2
 
-        # phase cruise and climb
-        cc = np.logical_and.reduce([climb, (self.phase==PHASE['CR'])])*1
+        # phase cruise and STEEP climb (VS >= 500 fpm) - uses nominal fuel flow
+        cc = np.logical_and.reduce([steep_climb, (self.phase==PHASE['CR'])])*1
         ffcc = fnom*cc
 
-        # cruise and level
-        ffcrl = fcr*lvl
+        # cruise and level OR shallow climb/descent (VS < 500 fpm) - uses cruise fuel flow
+        # This treats cruise climb profiles as level flight for fuel consumption
+        ffcrl = fcr*lvl_for_fuel
 
         # descent cruise configuration
         cd2 = np.logical_and.reduce ([descent, (self.phase==PHASE['CR'])])*1
