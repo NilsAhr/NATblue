@@ -60,7 +60,9 @@ flstheader = \
     'swats,' + \
     'throttle,' + \
     'temp,' + \
-    'rho' + '\n'
+    'rho,' + 
+    'flight_phase,' + 
+    'drag' + '\n'
 
 confheader = \
     'simt[s],' + \
@@ -507,6 +509,14 @@ class Loggerff(Entity):
         Temp = traf.Temp[:n_current]
         rho = traf.rho[:n_current]
 
+        # Flight phase and drag from performance model (for diagnostics)
+        flight_phase = np.zeros(n_current)
+        drag = np.zeros(n_current)
+        if hasattr(traf.perf, 'phase') and len(traf.perf.phase) >= n_current:
+            flight_phase = traf.perf.phase[:n_current]
+        if hasattr(traf.perf, 'D') and len(traf.perf.D) >= n_current:
+            drag = traf.perf.D[:n_current]
+
         # Ensure ALL arrays have exactly n_current elements and log
         if n_current > 0:
             self.flst.log(
@@ -555,7 +565,9 @@ class Loggerff(Entity):
                 swats.astype(int),                                 # swats [0/1]
                 throttle,                                          # throttle [-]
                 Temp,                                              # temp [K]
-                rho                                                # rho [kg/m³]
+                rho,                                               # rho [kg/m³]
+                flight_phase.astype(int),                          # flight_phase [1-6]
+                drag                                               # drag [N]
             )    
             
     def start_log(self):

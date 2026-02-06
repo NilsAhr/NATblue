@@ -357,7 +357,6 @@ class BADA(PerfBase):
         #Use cruise values instead
         cdld = np.where(self.cd0ld !=0, self.cd0ld+self.cd2ld*(cl*cl), cdph)
 
-
         # now combine phases
         cd = (self.phase==PHASE['TO'])*cdph + (self.phase==PHASE["IC"])*cdph + (self.phase==PHASE["CR"])*cdph \
             + (self.phase==PHASE['AP'])*cdapp + (self.phase ==PHASE['LD'])*cdld
@@ -509,7 +508,12 @@ class BADA(PerfBase):
         fmin = fminjt + fminp
 
         # cruise fuel flow jet, turbo and piston
-        fcrjt = eta*self.thrust*self.cf_cruise*jt
+        # For shallow climbs/descents (treated as cruise for fuel flow):
+        # Use drag D as the effective thrust, not the max climb thrust.
+        # In level flight self.thrust already equals D, so this only affects
+        # shallow climb/descent where self.thrust would be climb/descent thrust.
+        thrust_for_cruise_ff = np.where(lvl_for_fuel, self.D, self.thrust)
+        fcrjt = eta*thrust_for_cruise_ff*self.cf_cruise*jt
         fcrp = self.cf1*self.cf_cruise*pdf
         #merge
         fcr = fcrjt + fcrp
@@ -533,7 +537,8 @@ class BADA(PerfBase):
         ffcrl = fcr*lvl_for_fuel
 
         # descent cruise configuration
-        cd2 = np.logical_and.reduce ([descent, (self.phase==PHASE['CR'])])*1
+        # Only apply fmin for steep descents; shallow descents already handled by ffcrl above
+        cd2 = np.logical_and.reduce ([descent, np.logical_not(shallow_descent), (self.phase==PHASE['CR'])])*1
         ffcd = cd2*fmin
 
         # approach
