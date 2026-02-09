@@ -146,6 +146,7 @@ class BADA(PerfBase):
 
             # performance
             self.thrust      = np.array([])   # thrust
+            self.thrust_effective = np.array([])  # effective thrust matching fuel flow (for logging)
             self.D           = np.array([])   # drag
             self.fuelflow    = np.array([])   # fuel flow
 
@@ -315,6 +316,7 @@ class BADA(PerfBase):
         self.cf_cruise[-n:] = coeff.Cf_cruise
 
         self.thrust[-n:] = 0.0
+        self.thrust_effective[-n:] = 0.0
         self.D[-n:]         = 0.0
         self.fuelflow[-n:]  = 0.0
 
@@ -373,9 +375,9 @@ class BADA(PerfBase):
         lvl = np.array(np.abs(delalt)<0.0001)*1
 
         # Cruise climb detection: shallow climb/descent treated as level for fuel flow
-        # Threshold: vertical speed < 500 fpm (2.54 m/s) is considered "cruise climb"
+        # Threshold: vertical speed < 300 fpm is considered "cruise climb"
         # This allows continuous cruise climb profiles to use cruise fuel flow
-        cruise_climb_vs_threshold = 500. * fpm  # [m/s] - adjustable threshold
+        cruise_climb_vs_threshold = 300. * fpm  # [m/s] - adjustable threshold
         shallow_climb = np.logical_and(climb, np.abs(bs.traf.vs) < cruise_climb_vs_threshold)
         shallow_descent = np.logical_and(descent, np.abs(bs.traf.vs) < cruise_climb_vs_threshold)
         # For fuel flow: treat shallow climb/descent as level flight
@@ -449,7 +451,6 @@ class BADA(PerfBase):
         # merge all thrust conditions
         T = np.maximum.reduce([Tjc, Ttc, Tpc, Tlvl, Tdesh, Tdeslc, Tdesla, Tdesll, Tgd])
 
-
         # vertical speed
         # vertical speed. Note: ISA only ( tISA = 1 )
         # for climbs: reducing factor (reduced climb power) is multiplied
@@ -470,7 +471,15 @@ class BADA(PerfBase):
 
             # limit minimum thrust in descent to idle thrust
             T = np.where(descent, np.maximum(T_vs, T), T)
+
+        # Store actual physical thrust (used by calclimits, work calculation, etc.)
         self.thrust = T
+
+        # For logging/diagnostics: the EFFECTIVE thrust that matches fuel flow.
+        # During shallow climb/descent, fuel flow uses Drag (cruise-like),
+        # not max climb thrust. Log this so thrust matches fuel flow in CSV.
+        self.thrust_effective = np.where(shallow_climb, self.D,
+                                         np.where(shallow_descent, self.D, T))
 
 
         # Fuel consumption
@@ -528,11 +537,11 @@ class BADA(PerfBase):
         # initial climb
         ffic = fnom*(self.phase==PHASE['IC'])/2
 
-        # phase cruise and STEEP climb (VS >= 500 fpm) - uses nominal fuel flow
+        # phase cruise and STEEP climb (VS >= 300 fpm) - uses nominal fuel flow
         cc = np.logical_and.reduce([steep_climb, (self.phase==PHASE['CR'])])*1
         ffcc = fnom*cc
 
-        # cruise and level OR shallow climb/descent (VS < 500 fpm) - uses cruise fuel flow
+        # cruise and level OR shallow climb/descent (VS < 300 fpm) - uses cruise fuel flow
         # This treats cruise climb profiles as level flight for fuel consumption
         ffcrl = fcr*lvl_for_fuel
 

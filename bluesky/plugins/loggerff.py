@@ -60,8 +60,8 @@ flstheader = \
     'swats,' + \
     'throttle,' + \
     'temp,' + \
-    'rho,' + 
-    'flight_phase,' + 
+    'rho,' + \
+    'flight_phase,' + \
     'drag' + '\n'
 
 confheader = \
@@ -338,9 +338,11 @@ class Loggerff(Entity):
             raw_fuelflow = traf.perf.fuelflow[:n_current]
             positive_fuelflow = np.maximum(0, raw_fuelflow)
 
-            # Thrust
+            # Thrust - use thrust_effective (matches fuel flow) if available
             thrust = np.zeros(n_current)
-            if hasattr(traf.perf, 'thrust') and len(traf.perf.thrust) >= n_current:
+            if hasattr(traf.perf, 'thrust_effective') and len(traf.perf.thrust_effective) >= n_current:
+                thrust = traf.perf.thrust_effective[:n_current]
+            elif hasattr(traf.perf, 'thrust') and len(traf.perf.thrust) >= n_current:
                 thrust = traf.perf.thrust[:n_current]
             
             # Add this debug code for mass

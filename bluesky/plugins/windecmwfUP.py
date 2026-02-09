@@ -182,7 +182,7 @@ class WindECMWFUP(WindSim):
 
 
             Arguments:
-            - lat0 (south), lon0(east), lat1(north), lon1(west) [deg]:
+            - lat0, lon0, lat1, lon1 [deg]: [two corner points]
             - windecmwfup 20 0 90 -90 yyyy mm dd hh
 
             Bounding box in which to generate wind field
