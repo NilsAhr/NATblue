@@ -300,7 +300,7 @@ class Loggerff(Entity):
         #########################################################
         
         # Check if simulation should end
-        if sim.simt >= 24 * 3600:  # 24 hours in seconds
+        if sim.simt >= 48 * 3600:  # 24 hours in seconds
             if traf.ntraf == 0:
                 if self.sim_name is None:
                     print(f"END of simulation: NAME NOT DEFINED at: {sim.simt}seconds = {sim.simt/3600}hours")
