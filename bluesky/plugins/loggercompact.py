@@ -82,8 +82,8 @@ def init_plugin():
             'Starts the compact flight-state and conflict logger'
         ],
         'SETMASS': [
-            'SETMASS acid, mass',
-            'acid, float',
+            'SETMASS acid,mass',
+            '[acid,float]',
             loggercompact.setmass,
             'Set aircraft mass [kg] after creation, e.g. SETMASS callsign, 257656.4'
         ]

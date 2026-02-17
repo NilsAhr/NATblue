@@ -115,8 +115,8 @@ def init_plugin():
             'Starts the flight status and conflict loggerff'
         ],
         'SETMASS': [
-            'SETMASS acid, mass',
-            'acid, float',
+            'SETMASS acid,mass',
+            '[acid,float]',
             loggerff.setmass,
             'Set aircraft mass [kg] after creation, e.g. SETMASS callsign, 257656.4'
         ]
