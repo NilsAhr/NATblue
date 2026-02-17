@@ -113,6 +113,12 @@ def init_plugin():
             '',
             loggerff.start_log,
             'Starts the flight status and conflict loggerff'
+        ],
+        'SETMASS': [
+            'SETMASS acid, mass',
+            'acid, float',
+            loggerff.setmass,
+            'Set aircraft mass [kg] after creation, e.g. SETMASS callsign, 257656.4'
         ]
         }
 
@@ -577,3 +583,39 @@ class Loggerff(Entity):
         self.flst.start()
         self.conflog.start()
         return True, f'FLST and CONF loggerff is ON for simulation: {self.sim_name}.'
+
+    def setmass(self, idx, mass_kg):
+        """Set aircraft mass [kg] in the BADA performance model.
+        
+        Usage in scenario file:
+            SETMASS callsign, mass_in_kg
+        
+        This sets the initial mass for the aircraft after CRE, overriding
+        the default 95% MTOW used by BADA.
+        """
+        # Validate mass
+        if mass_kg <= 0:
+            return False, f'SETMASS: Mass must be positive, got {mass_kg} kg.'
+
+        # Get the flight ID for messaging
+        acid = traf.id[idx]
+
+        # Check if BADA performance model is active and has mass array
+        if not hasattr(traf.perf, 'mass') or len(traf.perf.mass) == 0:
+            return False, f'SETMASS {acid}: No performance model with mass data active. Is PERF BADA loaded?'
+
+        # Validate against BADA mass limits if available
+        if hasattr(traf.perf, 'mmin') and hasattr(traf.perf, 'mmax'):
+            mmin = traf.perf.mmin[idx]
+            mmax = traf.perf.mmax[idx]
+            if mass_kg < mmin:
+                return False, f'SETMASS {acid}: Mass {mass_kg:.1f} kg is below OEW limit ({mmin:.1f} kg).'
+            if mass_kg > mmax:
+                return False, f'SETMASS {acid}: Mass {mass_kg:.1f} kg exceeds MTOW limit ({mmax:.1f} kg).'
+
+        # Set the mass
+        old_mass = traf.perf.mass[idx]
+        traf.perf.mass[idx] = mass_kg
+
+        print(f'SETMASS {acid}: Mass set from {old_mass:.1f} kg to {mass_kg:.1f} kg')
+        return True, f'SETMASS {acid}: Mass set to {mass_kg:.1f} kg (was {old_mass:.1f} kg).'
