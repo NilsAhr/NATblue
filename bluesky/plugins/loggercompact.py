@@ -222,6 +222,25 @@ class LoggerCompact(Entity):
                 print(f"COMPACT LOGGER - {self.sim_name}: {cs} landed at {sim.simt}; "
                       f"active aircraft: {traf.ntraf}")
 
+            # Safety net: delete zombie aircraft that have been flying
+            # longer than 24 h or have invalid coordinates.
+            # This catches flights whose destination lookup failed
+            # (valid_dest=False) so they were never distance-checked.
+            if traf.ntraf > 0:
+                flight_ages = sim.simt - self.create_time[:traf.ntraf]
+                max_flight_s = 24.0 * 3600.0           # 24 hours hard limit
+                bad_lat = np.abs(traf.lat[:traf.ntraf]) > 90.0
+                too_old = flight_ages > max_flight_s
+                zombie_mask = too_old | bad_lat
+                zombie_indices = np.where(zombie_mask)[0]
+                # Delete in reverse order to keep indices valid
+                for idx in sorted(zombie_indices, reverse=True):
+                    cs = traf.id[idx]
+                    age_h = flight_ages[idx] / 3600.0
+                    traf.delete(idx)
+                    print(f"COMPACT LOGGER - {self.sim_name}: ZOMBIE {cs} deleted "
+                          f"(age={age_h:.1f}h); active aircraft: {traf.ntraf}")
+
         # ---------------------------------------------------------------
         # 2. EARLY EXIT
         # ---------------------------------------------------------------

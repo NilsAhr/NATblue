@@ -1806,7 +1806,8 @@ EPKP, Pobiednik Wielki Airport, 50.09, 20.202, Small, 3400, PL,650
 EPKR, Krosno Airport, 49.681, 21.737, Small, 3400, PL,922 
 EPKS, KRZESINY, 52.332, 16.966, Small, 8202, PL,265 
 EPKT, PYRZOWICE, 50.474, 19.08, Medium, 9183, PL,995 
-EPKW, Bielsko-Bialo Kaniow Airfield, 49.94, 19.022, Small, , PL,1316 
+EPKW, Bielsko-Bialo Kaniow Airfield, 49.94, 19.022, Small, , PL,1316
+EPLB, Lublin Swidnik, 51.23774, 22.69596, Medium, , PL,633  
 EPLE, LEGNICA, 51.183, 16.178, Small, 5249, PL,407 
 EPLK, LASK, 51.552, 19.179, Small, 8200, PL,633 
 EPLL, LUBLINEK, 51.722, 19.398, Medium, 4733, PL,604 
@@ -4294,7 +4295,8 @@ KUOX, UNIVERSITY OXFORD, 34.384, -89.537, Small, 5600, US/MS,452
 KVAD, MOODY AFB, 30.968, -83.193, Medium, 9300, US/GA,233 
 KVBG, VANDENBERG AFB, 34.737, -120.584, Medium, 15000, US/CA,369 
 KVCT, VICTORIA RGNL, 28.853, -96.918, Large, 9101, US/TX,115 
-KVLD, VALDOSTA RGNL, 30.782, -83.277, Large, 6302, US/GA,203 
+KVLD, VALDOSTA RGNL, 30.782, -83.277, Large, 6302, US/GA,203
+KVNY, Van Nuys Northridge, 34.21891, -118.49124, Medium, , US, 802
 KVOK, VOLK FLD, 43.939, -90.253, Medium, 9000, US/WI,912 
 KVPS, EGLIN AFB, 30.483, -86.525, Medium, 12005, US/FL,87 
 KVPZ, PORTER CO MUNI, 41.454, -87.007, Large, 7000, US/IN,771 
@@ -4431,7 +4433,8 @@ LEMU, Muchamiel Airport, 38.441, -0.475, Small, , SP,427
 LEMX, La Mancha-Toledo Airport, 39.562, -3.251, Small, , SP,2405 
 LENA, Benabarre Airport, 42.023, 0.482, Small, , SP,2450 
 LEOC, OCANA, 39.938, -3.503, Small, 4134, SP,2405 
-LEOT, Ontur Airport, 38.617, -1.525, Small, , SP,2200 
+LEOT, Ontur Airport, 38.617, -1.525, Small, , SP,2200
+LEPA, PALMA DE MALLORCA, 39.552, 2.739, Large, 10728, SP,27
 LEPI, Casas de los Pinos Airport, 39.298, -2.379, Small, , SP,2370 
 LEPP, PAMPLONA, 42.77, -1.646, Medium, 7241, SP,1504 
 LEPR, Palma Del R\xc3\xado Airport, 37.715, -5.214, Small, , SP,408 
@@ -5560,7 +5563,8 @@ LUKK, CHISINAU INTL, 46.928, 28.931, Medium, 11779, MD,399
 LUTR, Tiraspol Airport, 46.868, 29.591, Medium, , MD,141 
 LWOH, OHRID, 41.18, 20.742, Medium, 8366, MK,2313 
 LWSK, SKOPJE, 41.962, 21.621, Medium, 8038, MK,781 
-LXGB, GIBRALTAR, 36.151, -5.35, Medium, 5698, GI,15 
+LXGB, GIBRALTAR, 36.151, -5.35, Medium, 5698, GI,15
+LYBE, Belgrade Surcin, 44.82652, 20.29097, Medium, , RS, 335
 LYBR, Berane Airport, 42.839, 19.862, Small, , MJ,2287 
 LYKV, Ladevci Airport, 43.818, 20.587, Small, , RI,686 
 LYNK, Nik\xc5\xa1i\xc4\x87 Airport, 42.774, 18.915, Small, , MJ,2008 
