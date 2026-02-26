@@ -83,7 +83,7 @@ confheader = \
     'tLOS[sec],' + \
     'qdr[deg],' + \
     'dist[nm],' +\
-    'dalt_min[ft]' + \
+    'dalt_min[ft],' + \
     'tinconf[sec],' + \
     'toutconf[sec],' + \
     'duration[s],' + \
