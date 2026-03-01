@@ -295,11 +295,10 @@ class Loggerff(Entity):
             to_delete = np.nonzero(valid_dest)[0][to_delete_valid]
 
             # Delete the aircraft all at once
-            for idx in to_delete:
+            for idx in sorted(to_delete, reverse=True):
                 cs = traf.id[idx]
                 traf.delete(idx)
-                ac_act = traf.ntraf
-                print(f"FLST LOGGERFF - {self.sim_name}: {cs} landed at {sim.simt}; active aircraft: {ac_act}")
+                print(f"FLST LOGGERFF - {self.sim_name}: {cs} landed at {sim.simt}; active aircraft: {traf.ntraf}")
 
         #########################################################
         ################## 2. EARLY EXIT CHECK ################
