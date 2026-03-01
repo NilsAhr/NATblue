@@ -216,7 +216,8 @@ class LoggerCompact(Entity):
             to_delete_valid = np.where(distances < self.d)[0]
             to_delete = np.nonzero(valid_dest)[0][to_delete_valid]
 
-            for idx in to_delete:
+            # Delete in reverse order to keep indices valid
+            for idx in sorted(to_delete, reverse=True):
                 cs = traf.id[idx]
                 traf.delete(idx)
                 print(f"COMPACT LOGGER - {self.sim_name}: {cs} landed at {sim.simt}; "
