@@ -277,7 +277,6 @@ class LoggerCompact(Entity):
                 self.dcpa[cpf] = np.asarray(traf.cd.dcpa)[i]
                 self.dalt[cpf] = np.asarray(traf.cd.dalt)[i]
                 self.tcpa[cpf] = np.asarray(traf.cd.tcpa)[i]
-                self.tLOS[cpf] = np.asarray(traf.cd.tLOS)[i]
                 self.qdr[cpf] = np.asarray(traf.cd.qdr)[i]
                 dist_now = np.asarray(traf.cd.dist)[i]
                 if cpf not in self.dist:
@@ -288,6 +287,9 @@ class LoggerCompact(Entity):
                     self.tinconf[cpf] = sim.simt
                 if cpf in traf.cd.lospairs_unique:
                     self.intrusion_occurred[cpf] = True
+                    # Record absolute sim-time of first LoS (once)
+                    if cpf not in self.tLOS:
+                        self.tLOS[cpf] = sim.simt
                 elif cpf not in self.intrusion_occurred:
                     self.intrusion_occurred[cpf] = False
 
@@ -321,7 +323,7 @@ class LoggerCompact(Entity):
                     self.init_lat2[cpf], self.init_lon2[cpf], self.init_alt2[cpf] / ft,
                     self.init_hdg1[cpf], self.init_hdg2[cpf],
                     self.init_vs1[cpf], self.init_vs2[cpf],
-                    self.dcpa[cpf] / nm, self.tcpa[cpf], self.tLOS[cpf],
+                    self.dcpa[cpf] / nm, self.tcpa[cpf], self.tLOS.get(cpf, -1),
                     self.qdr[cpf], self.dist[cpf] / nm, self.dalt[cpf] / ft,
                     self.tinconf[cpf], sim.simt, self.duration[pair],
                     int(self.intrusion_occurred[cpf])
