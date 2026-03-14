@@ -1,11 +1,14 @@
 """
-plugin with update function in 1h intervals
+plugin with update function in configurable intervals
 ERA5 data was migrated to CDS completely https://cds.climate.copernicus.eu
 
 - you need an CDS / ECMWF account to retrieve data!!!
 - usage: [windecmwfup 20 0 90 -90 yyyy mm dd hh]
         NAT [10 50 90 -130 yyyy mm dd hh]
-- resolution of data need to be 0.25x0.25 (see reshapefactor)
+        with resolution: [windecmwfup 20 0 90 -90 yyyy mm dd hh 1.0 10800]
+- native resolution of data is 0.25x0.25 (see reshapefactor)
+- optional spatial_res (deg) and time_res (s) control subsampling
+  and update rate; defaults are 0.25 deg and 3600 s (1h)
 
 written by Nils Ahrenhold (TUD/DLR) 22.01.2025 """
 
@@ -17,6 +20,7 @@ import bluesky as bs
 import netCDF4 as nc
 from bluesky import stack
 from bluesky.core import timed_function
+from bluesky.core.simtime import TimerMeta
 from bluesky.traffic.windsim import WindSim
 
 
@@ -51,6 +55,10 @@ class WindECMWFUP(WindSim):
         self.lon0  = -180 # Western Hemisphere (min longitude)
         self.lat1  = 90 # North Pole (max latitude)
         self.lon1  = 180 # Eastern Hemisphere (max longitude)
+
+        # Resolution settings (defaults = native 0.25 deg, 1h update)
+        self.spatial_res = 0.25   # spatial resolution in degrees
+        self.time_res    = 3600   # update interval in seconds
 
         # Switch for periodic loading of new GFS data
         self.autoload = False
@@ -133,7 +141,7 @@ class WindECMWFUP(WindSim):
         return netcdf
 
     
-    def extract_wind(self, netcdf, lat0, lon0, lat1, lon1, hour):
+    def extract_wind(self, netcdf, lat0, lon0, lat1, lon1, hour, spatial_res=0.25):
 
         # Load reanalysis data 
         level = netcdf['pressure_level'][:].data
@@ -141,16 +149,19 @@ class WindECMWFUP(WindSim):
         lons  = netcdf['longitude'][:].data
         vxs_  = netcdf['u'][:].squeeze().data
         vys_  = netcdf['v'][:].squeeze().data
-        
-        # Close data for performance
-        #netcdf.close()   
+
+        # Subsample lat/lon if spatial_res > native 0.25 deg
+        native_res = 0.25
+        step = max(1, int(round(spatial_res / native_res)))
+        if step > 1:
+            lats = lats[::step]
+            lons = lons[::step]
+            vxs_ = vxs_[:, :, ::step, ::step]   # dims: [time, level, lat, lon]
+            vys_ = vys_[:, :, ::step, ::step]
         
         # Transform pressure levels to altitude
         p = level * 100
         h = (1 - (p / 101325.0)**0.190264) * 44330.76923    # in meters
-        
-        # Set hour to rounded hour
-        #hour = round(hour/3)
         
         # Construct 2D array of all data points
         lats_ = np.tile(np.repeat(lats, len(lons)), len(level))
@@ -177,17 +188,24 @@ class WindECMWFUP(WindSim):
 
     @stack.command(name='WINDECMWFUP')
     def loadwind(self, lat0: 'lat', lon0: 'lon', lat1: 'lat', lon1: 'lon',
-               year: int=None, month: int=None, day: int=None, hour: int=None):
+               year: int=None, month: int=None, day: int=None, hour: int=None,
+               spatial_res: float=None, time_res: int=None):
         ''' WINDECMWFUP: Load a windfield directly from CDS database.
 
 
             Arguments:
             - lat0, lon0, lat1, lon1 [deg]: [two corner points]
             - windecmwfup 20 0 90 -90 yyyy mm dd hh
+            - windecmwfup 20 0 90 -90 yyyy mm dd hh spatial_res time_res
+              e.g. windecmwfup 10 50 90 -130 2025 03 14 08 1.0 10800
 
             Bounding box in which to generate wind field
             - year, month, day, hour: Date and time of wind data (optional, will use
               current simulation UTC if not specified).
+            - spatial_res [deg]: Spatial resolution for wind field subsampling
+              (default 0.25 = native ERA5 resolution). E.g. 1.0 for 1 deg.
+            - time_res [seconds]: Wind field update interval in seconds
+              (default 3600 = 1h). E.g. 10800 for 3h updates.
         '''
         self.lat0, self.lon0, self.lat1, self.lon1 =  min(lat0, lat1), \
                               min(lon0, lon1), max(lat0, lat1), max(lon0, lon1)
@@ -197,8 +215,21 @@ class WindECMWFUP(WindSim):
         #self.hour = hour or bs.sim.utc.hour
         self.hour = hour if hour is not None else bs.sim.utc.hour  # <-- Only override if hour is not provided
 
-        #stack.echo(f'XXXX-Simulation UTC time: {bs.sim.utc.year}-{bs.sim.utc.month:02d}-{bs.sim.utc.day:02d} {bs.sim.utc.hour:02d}:00')
-        
+        # Apply spatial and time resolution if provided
+        if spatial_res is not None:
+            self.spatial_res = spatial_res
+        if time_res is not None:
+            self.time_res = int(time_res)
+            # Dynamically adjust the timed_function update interval
+            timer = TimerMeta.gettimer('WINDECMWFUP')
+            if timer is not None:
+                timer.setdt(self.time_res)
+                stack.echo(f"Wind update interval set to {self.time_res}s "
+                           f"({self.time_res/3600:.1f}h)")
+
+        stack.echo(f"Resolution: spatial={self.spatial_res} deg, "
+                   f"update interval={self.time_res}s ({self.time_res/3600:.1f}h)")
+
         if self.hour == 24:
             ymd0 = "%04d%02d%02d" % (self.year, self.month, self.day)
             ymd1 = (datetime.datetime.strptime(ymd0, '%Y%m%d') + 
@@ -223,11 +254,14 @@ class WindECMWFUP(WindSim):
         self.clear()
 
         # add new wind field
-        data = self.extract_wind(netcdf, self.lat0, self.lon0, self.lat1, self.lon1, self.hour).T
+        data = self.extract_wind(netcdf, self.lat0, self.lon0, self.lat1, self.lon1,
+                                 self.hour, spatial_res=self.spatial_res).T
         
-        data = data[np.lexsort((data[:, 2], data[:, 1], data[:, 0]))] # Sort by lat, lon, alt        
-        reshapefactor = int((1 + (max(self.lat0, self.lat1) - min(self.lat0, self.lat1))*4) * \
-                            (1 + (max(self.lon0, self.lon1) - min(self.lon0, self.lon1))*4))
+        data = data[np.lexsort((data[:, 2], data[:, 1], data[:, 0]))] # Sort by lat, lon, alt
+        # Compute reshapefactor from actual resolution (points per degree = 1/spatial_res)
+        ppd = 1.0 / self.spatial_res  # points per degree
+        reshapefactor = int((1 + (max(self.lat0, self.lat1) - min(self.lat0, self.lat1)) * ppd) * \
+                            (1 + (max(self.lon0, self.lon1) - min(self.lon0, self.lon1)) * ppd))
         
         lat     = np.reshape(data[:,0], (reshapefactor, -1)).T[0,:]
         lon     = np.reshape(data[:,1], (reshapefactor, -1)).T[0,:]
@@ -241,24 +275,27 @@ class WindECMWFUP(WindSim):
         self.autoload = True  # Enable autoload for next update
         return True, "Wind field updated in area [%d, %d], [%d, %d]. " \
             % (self.lat0, self.lat1, self.lon0, self.lon1) \
-            + "time: %04d-%02d-%02d-%02d:00" \
-            % (self.year, self.month, self.day, self.hour)
+            + "time: %04d-%02d-%02d-%02d:00 (res: %.2f deg, %ds update)" \
+            % (self.year, self.month, self.day, self.hour, self.spatial_res, self.time_res)
 
-    @timed_function(name='WINDECMWFUP', dt=3600) #1h = 3600, 2h = 7200, 3h = 10800,  4h = 14400, 5h = 18000, 6h = 21600, 8h = 28800
+    @timed_function(name='WINDECMWFUP', dt=3600) #default 1h; changed dynamically via time_res parameter
     def update(self):
         if self.autoload:
-            #if self.just_loaded:
-            #    self.just_loaded = False
-            #    return  # Skip the first update after manual load
-            #stack.echo("updating windfield")
-            
-            # Sync to simulation time instead of incrementing
-            self.year = bs.sim.utc.year
-            self.month = bs.sim.utc.month
-            self.day = bs.sim.utc.day
-            self.hour = bs.sim.utc.hour
+            # Advance by the number of hours corresponding to time_res,
+            # anchored to the initial load time (not synced to sim UTC,
+            # which avoids misalignment with the optimiser's time grid)
+            hours_step = max(1, self.time_res // 3600)
+            self.hour += hours_step
 
-            #stack.echo(f"Simulation time: {self.year}-{self.month:02d}-{self.day:02d} {self.hour:02d}:00")
+            # Handle day rollover
+            if self.hour >= 24:
+                days_ahead = self.hour // 24
+                self.hour = self.hour % 24
+                current_date = datetime.date(self.year, self.month, self.day)
+                next_date = current_date + datetime.timedelta(days=days_ahead)
+                self.year = next_date.year
+                self.month = next_date.month
+                self.day = next_date.day
             
             # Only reload NetCDF if the date changed    
             ymd_now = f"{self.year:04d}{self.month:02d}{self.day:02d}"
