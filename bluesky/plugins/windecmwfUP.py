@@ -273,6 +273,14 @@ class WindECMWFUP(WindSim):
 
         #self.just_loaded = True  # Mark that data was just loaded
         self.autoload = True  # Enable autoload for next update
+
+        # Reset the timer counter so the next automatic update fires
+        # a full time_res interval after this manual load, not immediately
+        timer = TimerMeta.gettimer('WINDECMWFUP')
+        if timer is not None:
+            timer.counter = timer.rel_freq
+            timer.readynext = False
+
         return True, "Wind field updated in area [%d, %d], [%d, %d]. " \
             % (self.lat0, self.lat1, self.lon0, self.lon1) \
             + "time: %04d-%02d-%02d-%02d:00 (res: %.2f deg, %ds update)" \
