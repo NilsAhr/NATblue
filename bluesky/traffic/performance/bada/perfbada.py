@@ -199,7 +199,7 @@ class BADA(PerfBase):
         # Initial aircraft mass is currently reference mass.
         # BADA 3.12 also supports masses between 1.2*mmin and mmax
         #self.mass[-n:]      = coeff.m_ref * 1000.0
-        self.mass[-n:]      = coeff.m_max * 1000.0 * 0.95  # 95% of MTOW as initial mass
+        self.mass[-n:]      = coeff.m_max * 1000.0 * 0.85  # 85% of MTOW as initial mass
         self.mmin[-n:]      = coeff.m_min * 1000.0
         self.mmax[-n:]      = coeff.m_max * 1000.0
 
