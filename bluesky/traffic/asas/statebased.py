@@ -100,9 +100,27 @@ class StateBased(ConflictDetection):
         swlos = (dist < rpz) * (np.abs(dalt) < hpz)
         lospairs = [(ownship.id[i], ownship.id[j]) for i, j in zip(*np.where(swlos))]
 
+        # ------------------------------------------------------------------
+        # Minimum vertical distance during conflict window [tinconf, toutconf]
+        # ------------------------------------------------------------------
+        with np.errstate(invalid='ignore', over='ignore'):
+            dalt_entry = dalt + dvs * tinconf
+            dalt_exit  = dalt + dvs * toutconf
+
+        # Time when vertical separation is zero (if within the window)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t_cross = -dalt / dvs
+        cross_in_window = (t_cross >= tinconf) & (t_cross <= toutconf)
+
+        min_dalt = np.where(
+            cross_in_window,
+            0.0,
+            np.minimum(np.abs(dalt_entry), np.abs(dalt_exit))
+        )
+
         return confpairs, lospairs, inconf, tcpamax, \
             qdr[swconfl], dist[swconfl], np.sqrt(dcpa2[swconfl]), \
-                tcpa[swconfl], tinconf[swconfl]
+                tcpa[swconfl], tinconf[swconfl], min_dalt[swconfl]
 
 
 try:

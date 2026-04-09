@@ -1,7 +1,7 @@
 """ BlueSky aircraft performance calculations using BADA 3.xx."""
 import numpy as np
 import bluesky as bs
-from bluesky.tools.aero import kts, ft, fpm, g0, vtas2cas, vcas2tas
+from bluesky.tools.aero import kts, ft, fpm, g0, vtas2cas, vcas2tas, vtas2mach
 from bluesky.traffic.performance.perfbase import PerfBase
 from bluesky.traffic.performance.legacy.performance import esf, phases, calclimits, PHASE
 from bluesky import settings
@@ -611,11 +611,17 @@ class BADA(PerfBase):
         self.hmaxact = (self.hmax==0)*self.hmo +(self.hmax !=0)*np.minimum(self.hmo, self.hact)
 
         # forwarding to tools
+        # Use Mach derived from desired TAS at current altitude instead
+        # of the current actual Mach (bs.traf.M).  When M slightly
+        # exceeds MMO due to an altitude change, the old code would
+        # clamp speed to MMO — overriding even a speed DECREASE
+        # requested by ASAS, leaving no room for conflict resolution.
+        intent_M = vtas2mach(intent_v, bs.traf.alt)
         self.limspd, self.limspd_flag, self.limalt, \
             self.limalt_flag, self.limvs, self.limvs_flag = calclimits(
                 vtas2cas(intent_v, bs.traf.alt), bs.traf.gs,
                 self.vmto, self.vmin, self.vmo, self.mmo,
-                bs.traf.M, bs.traf.alt, self.hmaxact,
+                intent_M, bs.traf.alt, self.hmaxact,
                 intent_h, intent_vs, self.maxthr,
                 self.thrust, self.D, bs.traf.tas,
                 self.mass, self.ESF, self.phase)
