@@ -31,8 +31,24 @@ dimension to use:
      keep vertical resolution active until well past CPA instead of
      toggling on/off.
 
+Recovery algorithm (Schaberg 2-criteria, NAT-adapted)
+-----------------------------------------------------
+Replaces the stock 1-criterion past-CPA check.  Two criteria must
+both pass before ASAS hands control back to the autopilot:
+
+  **Criterion 1**: Dcpa(Vo_desired, Vi_current_reso) > RPZ × factor
+  **Criterion 2**: Dcpa(Vo_desired, Vi_initial)      > RPZ × factor
+
+Additional NAT guards:
+  - min hold time (default 30 s) to prevent premature recovery
+  - max hold time (default 0 = off) as safety valve for same-dir
+    traffic where Dcpa may never exceed threshold
+
 Parameters (configurable via stack commands):
   - ``nat_ceiling_margin_ft``: altitude buffer below perf.hmax [ft]
+  - ``nat_min_hold_t``: minimum ASAS hold time [s]
+  - ``nat_max_hold_t``: maximum ASAS hold time [s]  (0 = unlimited)
+  - ``nat_dcpa_margin``: Dcpa threshold multiplier on RPZ
 
 Stack commands registered
 -------------------------
@@ -46,6 +62,10 @@ Stack commands registered
                           HORIZ_HDG   horizontal heading only
                           VERT_FIRST  try vertical, fallback horizontal
                           HORIZ_FIRST try horizontal, fallback vertical
+  NATRECOVERY [setting] [value] — configure 2-criteria recovery:
+                          MINHOLD s   min hold time (default 30)
+                          MAXHOLD s   max hold time (default 0=off)
+                          DCPAFAC x   Dcpa factor on RPZ (default 1.0)
 
 @author : Nils Ahrenhold (ahre_ni)
 @date   : 2026-04
@@ -58,7 +78,7 @@ from bluesky.tools.aero import ft, nm, fpm, vtas2mach
 from bluesky.traffic.asas.mvp import MVP
 
 # --- DEBUG ---
-_MVPNAT_VERSION = '2026-04-10a'  # bump on every edit
+_MVPNAT_VERSION = '2026-04-10b'  # bump on every edit
 print(f'[MVPNAT] loaded version {_MVPNAT_VERSION}')
 _dbg_count = 0   # limit debug output to first N calls
 _DBG_MAX   = 40  # max debug lines
@@ -72,6 +92,33 @@ _VALID_DOMAINS = {
     'VERT_FIRST',    # try vertical, fallback horizontal if guard triggers
     'HORIZ_FIRST',   # try horizontal, fallback vertical if guard triggers
 }
+
+_dbg_recov_count = 0  # separate debug counter for recovery
+
+
+def _compute_dcpa_h(dist_h, vrel_h):
+    """Horizontal distance at CPA given 2-D position & relative velocity.
+
+    Parameters
+    ----------
+    dist_h : ndarray (2,)   east/north distance vector [m]
+    vrel_h : ndarray (2,)   east/north relative velocity [m/s]
+
+    Returns
+    -------
+    float   distance at CPA [m].  If tcpa < 0 (diverging), return
+            current distance (aircraft will never be closer).
+    """
+    vrel_sq = float(np.dot(vrel_h, vrel_h))
+    if vrel_sq < 1e-6:
+        # Nearly zero relative velocity → distance is constant.
+        return float(np.linalg.norm(dist_h))
+    tcpa = -float(np.dot(dist_h, vrel_h)) / vrel_sq
+    if tcpa < 0:
+        # CPA is in the past → aircraft are diverging.
+        return float(np.linalg.norm(dist_h))
+    dcpa_vec = dist_h + vrel_h * tcpa
+    return float(np.linalg.norm(dcpa_vec))
 
 
 class MVPNAT(MVP):
@@ -96,6 +143,18 @@ class MVPNAT(MVP):
         # ------ NAT-specific tunables ------
         self.nat_ceiling_margin_ft = 500.0  # buffer below hmax [ft]
         self.nat_domain = 'VERT'            # resolution domain strategy
+
+        # ------ Schaberg 2-criteria recovery ------
+        self._preconf_state = {}   # acid → {gseast, gsnorth, vs, alt}
+        self._reso_start_t  = {}   # (ac1, ac2) → simt at first detection
+        self.nat_min_hold_t  = 30.0  # [s] min ASAS hold before recovery check
+        self.nat_max_hold_t  = 0.0   # [s] max ASAS hold, force recovery (0 = off)
+        self.nat_dcpa_margin = 1.0   # Dcpa threshold = RPZ × this factor
+
+    def reset(self):
+        super().reset()
+        self._preconf_state.clear()
+        self._reso_start_t.clear()
 
     # ==================================================================
     #  Stack commands for NAT tunables
@@ -175,6 +234,46 @@ class MVPNAT(MVP):
               f'(swresovert={self.swresovert}, swresohoriz={self.swresohoriz}, '
               f'swresospd={self.swresospd}, swresohdg={self.swresohdg})')
         return True, f'NAT domain set to {self.nat_domain}'
+
+    @stack.command(name='NATRECOVERY')
+    def set_recovery(self, setting: 'txt' = '', value: float = -1.0):
+        """Configure Schaberg 2-criteria recovery parameters.
+
+        Usage: NATRECOVERY [setting] [value]
+
+        Settings
+        --------
+        MINHOLD  [s]   Minimum hold time before recovery check (default 30).
+        MAXHOLD  [s]   Maximum hold time, force recovery. 0 = off (default 0).
+        DCPAFAC  [x]   Dcpa threshold as multiplier of RPZ (default 1.0).
+
+        Without arguments: print current values.
+        """
+        if not setting:
+            return True, (
+                f'NATRECOVERY [MINHOLD|MAXHOLD|DCPAFAC] [value]\n'
+                f'  MINHOLD  = {self.nat_min_hold_t:.0f} s\n'
+                f'  MAXHOLD  = {self.nat_max_hold_t:.0f} s  (0 = unlimited)\n'
+                f'  DCPAFAC  = {self.nat_dcpa_margin:.2f}\n'
+                f'  Pre-conflict states stored: {len(self._preconf_state)}\n'
+                f'  Active reso pairs tracked : {len(self._reso_start_t)}')
+
+        setting = setting.upper().strip()
+        if value < 0:
+            return False, f'NATRECOVERY {setting} [value]  — value must be >= 0'
+
+        if setting == 'MINHOLD':
+            self.nat_min_hold_t = value
+            return True, f'NAT recovery min hold set to {value:.0f} s'
+        elif setting == 'MAXHOLD':
+            self.nat_max_hold_t = value
+            return True, f'NAT recovery max hold set to {value:.0f} s (0 = unlimited)'
+        elif setting == 'DCPAFAC':
+            self.nat_dcpa_margin = max(value, 0.5)
+            return True, f'NAT recovery Dcpa factor set to {self.nat_dcpa_margin:.2f}'
+        else:
+            return False, (f'Unknown setting "{setting}". '
+                           f'Valid: MINHOLD, MAXHOLD, DCPAFAC')
 
     # Re-register dimension switches under _NAT names so they don't
     # collide with the original MVP commands when both are loaded.
@@ -523,6 +622,189 @@ class MVPNAT(MVP):
                           f'swresovert={self.swresovert}')
 
         return newtrack, allowed_tas, vscapped, alt
+
+    # ==================================================================
+    #  resumenav() — Schaberg 2-criteria recovery (NAT adaptation)
+    # ==================================================================
+    def resumenav(self, conf, ownship, intruder):
+        """Decide per aircraft whether ASAS should remain active.
+
+        Replaces the stock 1-criterion past-CPA check with the Schaberg
+        2-criteria algorithm (Schaberg, 2021) adapted for NAT:
+
+        **Criterion 1** — *intruder keeps current resolution velocity*:
+            Vrel = Vi_current - Vo_desired
+            |Dcpa(Vrel)| > RPZ × dcpa_margin
+
+        **Criterion 2** — *intruder reverts to pre-conflict velocity*:
+            Vrel = Vi_initial - Vo_desired
+            |Dcpa(Vrel)| > RPZ × dcpa_margin
+
+        Recovery is allowed only when **both** criteria pass.
+
+        Additional NAT guards:
+          - **min hold time** : ASAS stays active for at least
+            ``nat_min_hold_t`` seconds after first detection.
+          - **max hold time** : if > 0, forces recovery after this
+            many seconds (safety valve for same-direction traffic
+            where Dcpa may never exceed threshold).
+          - **hor_los gate** : ASAS stays active while inside RPZ,
+            regardless of criteria.
+        """
+        global _dbg_recov_count
+
+        # ----------------------------------------------------------
+        #  1. Capture pre-conflict state for NEW conflict pairs
+        # ----------------------------------------------------------
+        for conflict in conf.confpairs:
+            if conflict not in self.resopairs:
+                ac1, ac2 = conflict
+                idx1, idx2 = bs.traf.id2idx(conflict)
+                # Store pre-conflict velocity — first time only
+                if ac1 not in self._preconf_state and idx1 >= 0:
+                    self._preconf_state[ac1] = dict(
+                        gseast=float(ownship.gseast[idx1]),
+                        gsnorth=float(ownship.gsnorth[idx1]),
+                        vs=float(ownship.vs[idx1]),
+                        alt=float(ownship.alt[idx1]))
+                if ac2 not in self._preconf_state and idx2 >= 0:
+                    self._preconf_state[ac2] = dict(
+                        gseast=float(intruder.gseast[idx2]),
+                        gsnorth=float(intruder.gsnorth[idx2]),
+                        vs=float(intruder.vs[idx2]),
+                        alt=float(intruder.alt[idx2]))
+                # Timestamp for hold-time logic
+                self._reso_start_t[conflict] = bs.sim.simt
+
+        # ----------------------------------------------------------
+        #  2. Track all active + newly-detected pairs
+        # ----------------------------------------------------------
+        self.resopairs.update(conf.confpairs)
+
+        delpairs = set()
+        changeactive = dict()
+
+        for conflict in self.resopairs:
+            ac1, ac2 = conflict
+            idx1, idx2 = bs.traf.id2idx(conflict)
+
+            # Ownship deleted → remove pair
+            if idx1 < 0:
+                delpairs.add(conflict)
+                self._reso_start_t.pop(conflict, None)
+                continue
+
+            # Intruder deleted → safe to recover
+            if idx2 < 0:
+                changeactive[idx1] = changeactive.get(idx1, False)
+                delpairs.add(conflict)
+                self._reso_start_t.pop(conflict, None)
+                continue
+
+            # ---- Hold time gates ------------------------------------
+            t_start = self._reso_start_t.get(conflict, bs.sim.simt)
+            dt_active = bs.sim.simt - t_start
+
+            # Min hold: too early to check criteria
+            if dt_active < self.nat_min_hold_t:
+                changeactive[idx1] = True
+                continue
+
+            # Max hold: force recovery (safety valve)
+            if self.nat_max_hold_t > 0 and dt_active > self.nat_max_hold_t:
+                changeactive[idx1] = changeactive.get(idx1, False)
+                delpairs.add(conflict)
+                self._reso_start_t.pop(conflict, None)
+                if _dbg_recov_count < _DBG_MAX:
+                    _dbg_recov_count += 1
+                    print(f'[MVPNAT-RECOV] t={bs.sim.simt:.1f} '
+                          f'MAXHOLD pair=({ac1},{ac2}) '
+                          f'dt={dt_active:.0f}s')
+                continue
+
+            # ---- Current horizontal geometry ------------------------
+            re = 6371000.0
+            dist = re * np.array([
+                np.radians(intruder.lon[idx2] - ownship.lon[idx1])
+                * np.cos(0.5 * np.radians(
+                    intruder.lat[idx2] + ownship.lat[idx1])),
+                np.radians(intruder.lat[idx2] - ownship.lat[idx1])])
+            hdist = float(np.linalg.norm(dist))
+            rpz = float(np.max(conf.rpz[[idx1, idx2]]))
+            dcpa_thr = rpz * self.nat_dcpa_margin
+
+            # Immediate safety: still inside horizontal PZ → stay active
+            if hdist < rpz:
+                changeactive[idx1] = True
+                continue
+
+            # ---- Retrieve pre-conflict velocities -------------------
+            pre1 = self._preconf_state.get(ac1)
+            pre2 = self._preconf_state.get(ac2)
+
+            if pre1 is None or pre2 is None:
+                # Fallback: stock past-CPA check
+                vrel = np.array([
+                    intruder.gseast[idx2] - ownship.gseast[idx1],
+                    intruder.gsnorth[idx2] - ownship.gsnorth[idx1]])
+                if np.dot(dist, vrel) > 0.0:
+                    changeactive[idx1] = changeactive.get(idx1, False)
+                    delpairs.add(conflict)
+                    self._reso_start_t.pop(conflict, None)
+                else:
+                    changeactive[idx1] = True
+                continue
+
+            # ---- Criterion 1: intruder keeps resolution velocity ----
+            vo_des = np.array([pre1['gseast'], pre1['gsnorth']])
+            vi_cur = np.array([intruder.gseast[idx2],
+                               intruder.gsnorth[idx2]])
+            vrel1  = vi_cur - vo_des
+            dcpa1  = _compute_dcpa_h(dist, vrel1)
+
+            # ---- Criterion 2: intruder reverts to initial velocity --
+            vi_init = np.array([pre2['gseast'], pre2['gsnorth']])
+            vrel2   = vi_init - vo_des
+            dcpa2   = _compute_dcpa_h(dist, vrel2)
+
+            # ---- Combined decision ----------------------------------
+            safe = (dcpa1 > dcpa_thr) and (dcpa2 > dcpa_thr)
+
+            if safe:
+                changeactive[idx1] = changeactive.get(idx1, False)
+                delpairs.add(conflict)
+                self._reso_start_t.pop(conflict, None)
+            else:
+                changeactive[idx1] = True
+
+            # Debug
+            if _dbg_recov_count < _DBG_MAX:
+                _dbg_recov_count += 1
+                tag = 'RECOVERED' if safe else 'HOLD'
+                print(f'[MVPNAT-RECOV] t={bs.sim.simt:.1f} {tag} '
+                      f'pair=({ac1},{ac2}) '
+                      f'dcpa1={dcpa1/nm:.2f}NM '
+                      f'dcpa2={dcpa2/nm:.2f}NM '
+                      f'thr={dcpa_thr/nm:.2f}NM '
+                      f'hdist={hdist/nm:.2f}NM '
+                      f'dt={dt_active:.0f}s')
+
+        # ----------------------------------------------------------
+        #  3. Apply active flags & clean up
+        # ----------------------------------------------------------
+        for idx, active in changeactive.items():
+            self.active[idx] = active
+            if not active:
+                # Clean up pre-conflict state for this aircraft
+                acid = bs.traf.id[idx]
+                self._preconf_state.pop(acid, None)
+                # Waypoint recovery: go to next active waypoint
+                iwpid = bs.traf.ap.route[idx].findact(idx)
+                if iwpid != -1:
+                    bs.traf.ap.route[idx].direct(
+                        idx, bs.traf.ap.route[idx].wpname[iwpid])
+
+        self.resopairs -= delpairs
 
     # ==================================================================
     #  MVP_NAT — single conflict pair with symmetry breaker
