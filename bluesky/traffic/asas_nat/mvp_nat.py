@@ -36,8 +36,8 @@ Recovery algorithm (Schaberg 2-criteria, NAT-adapted)
 Replaces the stock 1-criterion past-CPA check.  Two criteria must
 both pass before ASAS hands control back to the autopilot:
 
-  **Criterion 1**: Dcpa(Vo_desired, Vi_current_reso) > RPZ × factor
-  **Criterion 2**: Dcpa(Vo_desired, Vi_initial)      > RPZ × factor
+  **Criterion 1**: Dcpa(Vo_desired, Vi_current_reso) > RPZ x factor
+  **Criterion 2**: Dcpa(Vo_desired, Vi_initial)      > RPZ x factor
 
 Additional NAT guards:
   - min hold time (default 30 s) to prevent premature recovery
