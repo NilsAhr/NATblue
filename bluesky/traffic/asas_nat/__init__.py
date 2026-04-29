@@ -23,4 +23,5 @@ statebased_nat
 @date   : 2026-04
 """
 from .mvp_nat import MVPNAT
+from .mvp2nat import MVP2NAT
 from .statebased_nat import StateBasedNAT
