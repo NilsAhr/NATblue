@@ -4,6 +4,7 @@
     scenario, and the trigger fired for normal cruise pairs and blocked MVP's
     legitimate vertical separation commands. '''
 import numpy as np
+import bluesky as bs
 from bluesky import stack
 from bluesky.traffic.asas import ConflictResolution
 
@@ -102,6 +103,17 @@ class MVP2NAT(ConflictResolution):
         elif value == "OFF" or value == "OF" or value == "NONE":
             # Do NOT swtich off self.swresohoriz if value == OFF
             self.swresovert = False
+
+    @property
+    def tasactive(self):
+        ''' In vertical-only mode the autopilot retains Mach-hold control.
+            Without this override, tasactive inherits self.active (True for any
+            conflicting aircraft), causing aporasas to command a fixed TAS during
+            the climb — which raises Mach as altitude increases and produces MMO
+            violations. Returning False here keeps the speed channel with the AP. '''
+        if self.swresovert and not self.swresohoriz:
+            return np.zeros(bs.traf.ntraf, dtype=bool)
+        return self.active
 
     def applyprio(self, dv_mvp, dv1, dv2, vs1, vs2):
         ''' Apply the desired priority setting to the resolution '''
@@ -222,36 +234,46 @@ class MVP2NAT(ConflictResolution):
 
         # Limit resolution direction if required-----------------------------------
 
-        # Compute new speed vector in polar coordinates based on desired resolution
+        # [mvp2nat step 2] Generalised performance limits check.
+        # The original implementation capped ground-speed against a
+        # CAS-/TAS-based vmin/vmax window — a unit mismatch that, under
+        # NAT tailwinds, capped GS against TAS limits and produced
+        # spurious accelerations/decelerations. Here we instead route
+        # the magnitude through ``bs.traf.perf.limits`` (BADA-/OpenAP-
+        # aware) and treat it as TAS. The trade-off is that wind is no
+        # longer subtracted on the way out, so the returned speed is
+        # technically TAS — incompatible with downstream modules that
+        # expect GS, but consistent with how perf.limits operates.
+        # Multiple GS↔TAS conversions caused singularities at NAT-aligned
+        # angles; doing it once here avoids them.
         if self.swresohoriz: # horizontal resolutions
             if self.swresospd and not self.swresohdg: # SPD only
                 newtrack = ownship.trk
-                newgs    = np.sqrt(newv[0,:]**2 + newv[1,:]**2)
+                newtas   = np.sqrt(newv[0,:]**2 + newv[1,:]**2)
                 newvs    = ownship.vs
             elif self.swresohdg and not self.swresospd: # HDG only
                 newtrack = (np.arctan2(newv[0,:],newv[1,:])*180/np.pi) % 360
-                newgs    = ownship.gs
+                newtas   = ownship.tas
                 newvs    = ownship.vs
             else: # SPD + HDG
                 newtrack = (np.arctan2(newv[0,:],newv[1,:])*180/np.pi) %360
-                newgs    = np.sqrt(newv[0,:]**2 + newv[1,:]**2)
+                newtas   = np.sqrt(newv[0,:]**2 + newv[1,:]**2)
                 newvs    = ownship.vs
         elif self.swresovert: # vertical resolutions
             newtrack = ownship.trk
-            newgs    = ownship.gs
+            newtas   = ownship.tas
             newvs    = newv[2,:]
         else: # horizontal + vertical
             newtrack = (np.arctan2(newv[0,:],newv[1,:])*180/np.pi) %360
-            newgs    = np.sqrt(newv[0,:]**2 + newv[1,:]**2)
+            newtas   = np.sqrt(newv[0,:]**2 + newv[1,:]**2)
             newvs    = newv[2,:]
 
         # Determine ASAS module commands for all aircraft--------------------------
 
-        # Cap the velocity
-        newgscapped = np.maximum(ownship.perf.vmin,np.minimum(ownship.perf.vmax,newgs))
-
-        # Cap the vertical speed
-        vscapped = np.maximum(ownship.perf.vsmin,np.minimum(ownship.perf.vsmax,newvs))
+        # Single, BADA-/OpenAP-aware cap applied in TAS domain.
+        # Returns: allowed TAS, capped VS, (third value unused).
+        allowed_tas, vscapped, _ = ownship.perf.limits(
+            newtas, newvs, ownship.alt, bs.traf.ax)
 
         # Calculate if Autopilot selected altitude should be followed. This avoids ASAS from
         # climbing or descending longer than it needs to if the autopilot leveloff
@@ -274,7 +296,7 @@ class MVP2NAT(ConflictResolution):
         # using the auto pilot vertical speed (ownship.avs) using the code in line 106 (asasalttemp) when only
         # horizontal resolutions are allowed.
         alt = alt * (1 - self.swresohoriz) + ownship.selalt * self.swresohoriz
-        return newtrack, newgscapped, vscapped, alt
+        return newtrack, allowed_tas, vscapped, alt
 
     def MVP(self, ownship, intruder, conf, qdr, dist, tcpa, tLOS, idx1, idx2):
         """Modified Voltage Potential (MVP) resolution method"""
