@@ -6,7 +6,15 @@
 import numpy as np
 import bluesky as bs
 from bluesky import stack
+from bluesky.tools.aero import ft
 from bluesky.traffic.asas import ConflictResolution
+
+
+# Resolver safety clamps for degenerate geometries (in-trail, near-tangent).
+# Without these, divisions by near-zero geometric factors emit numerical
+# garbage that BADA perf.limits cannot always catch in a useful way.
+_ERRATUM_FLOOR = np.sin(np.radians(15.0))  # ~0.259; caps (alpha-beta) at 75 deg
+_MAX_DH_M = 5000.0 * ft                    # cap |asasalt - ownship.alt|
 
 
 class MVP2NAT(ConflictResolution):
@@ -280,7 +288,12 @@ class MVP2NAT(ConflictResolution):
         # altitude also resolves the conflict. Because asasalttemp is calculated using
         # the time to resolve, it may result in climbing or descending more than the selected
         # altitude.
-        asasalttemp = vscapped * timesolveV + ownship.alt
+        # Cap |dh| at 5000 ft. In-trail same-altitude geometries can yield
+        # tiny vrel[2] -> tsolV collapsed to tLOS, and tLOS * vsmax can push
+        # the altitude target far beyond any sensible resolution. The cap
+        # lets the resolver give up gracefully on geometries it cannot handle.
+        dh = np.clip(vscapped * timesolveV, -_MAX_DH_M, _MAX_DH_M)
+        asasalttemp = dh + ownship.alt
         signdvs = np.sign(vscapped - ownship.ap.vs * np.sign(ownship.selalt - ownship.alt))
         signalt = np.sign(asasalttemp - ownship.selalt)
         alt = np.where(np.logical_or(signdvs == 0, signdvs == signalt), asasalttemp, ownship.selalt)
@@ -341,6 +354,12 @@ class MVP2NAT(ConflictResolution):
             # Compute the resolution velocity vector in horizontal direction.
             # abs(tcpa) because it bcomes negative during intrusion.
             erratum = np.cos(np.arcsin(rpz_m / dist)-np.arcsin(dabsH / dist))
+            # Floor erratum at sin(15 deg). Near-tangent geometries
+            # (rpz_m ~ dist with dabsH ~ 0, e.g. in-trail) drive
+            # (alpha-beta) toward pi/2 and erratum toward 0, which makes
+            # rpz_m/erratum blow up. The floor caps the angle at 75 deg
+            # so the resolver backs out instead of emitting garbage.
+            erratum = max(erratum, _ERRATUM_FLOOR)
             dv1 = ((rpz_m / erratum - dabsH) * dcpa[0]) / (abs(tcpa) * dabsH)
             dv2 = ((rpz_m / erratum - dabsH) * dcpa[1]) / (abs(tcpa) * dabsH)
         else:
