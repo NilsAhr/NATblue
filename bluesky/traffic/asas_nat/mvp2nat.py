@@ -14,25 +14,29 @@ from bluesky.traffic.asas import ConflictResolution
 # Without these, divisions by near-zero geometric factors emit numerical
 # garbage that BADA perf.limits cannot always catch in a useful way.
 _ERRATUM_FLOOR = np.sin(np.radians(15.0))  # ~0.259; caps (alpha-beta) at 75 deg
-_MAX_DH_M = 5000.0 * ft                    # cap |asasalt - ownship.alt|
+_MAX_DH_M = 2000.0 * ft                    # cap |asasalt - ownship.alt|
 
 
 class MVP2NAT(ConflictResolution):
     ''' Conflict resolution using the Modified Voltage Potential Method.
         Functionally identical to stock MVP; renamed to allow side-by-side
-        comparison and to host future NAT-specific adjustments.
+        comparison and to host NAT-specific safety clamps (tasactive in
+        vertical-only mode, erratum floor, dh cap).
 
-        Defaults to VERTICAL-ONLY resolution mode. The renamed RMETHV2NAT /
-        RMETHH2NAT stack commands silently fail under BlueSky's current
-        replaceable-Entity machinery (see base.py:select() — FuncObjects
-        bind to the class rather than an instance when RESO swaps the
-        active resolver), so we set the mode in __init__ rather than
-        relying on the scenario command. '''
+        Default resolution domain is VERTICAL (stock MVP defaults to
+        horizontal). RMETHH2NAT / RMETHV2NAT stack commands silently
+        fail under BlueSky's replaceable-Entity machinery: when RESO
+        MVP2NAT is called from a scenario, no MVP2NAT instance yet
+        exists. FuncObjects bind to the class, the command sets class
+        attributes that are then shadowed by the instance __init__ once
+        the first conflict materialises. Confirmed empirically on
+        2026-05-12 — all four domain settings produced byte-identical
+        results. For domain comparison studies use the dedicated
+        derived classes below (MVP2NAT_VERT / MVP2NAT_SPD / MVP2NAT_HDG
+        / MVP2NAT_BOTH) and select via RESO MVP2NAT_<DOMAIN>. '''
     def __init__(self):
         super().__init__()
-        # NAT scenario default: vertical-only. Override via stack commands
-        # only works once RESO MVP2NAT has been activated AND an instance
-        # is correctly bound — see class docstring.
+        # NAT scenario default: vertical-only.
         self.swresohoriz = False
         self.swresospd = False
         self.swresohdg = False
@@ -382,10 +386,19 @@ class MVP2NAT(ConflictResolution):
             tsolV = tLOS
             iV    = hpz_m
 
-        # Compute the resolution velocity vector in the vertical direction
-        # The direction of the vertical resolution is such that the aircraft with
-        # higher climb/decent rate reduces their climb/decent rate
-        dv3 = np.where(abs(vrel[2]) > 0.0, (iV / tsolV) * (-vrel[2] / abs(vrel[2])), (iV / tsolV))
+        # Compute the resolution velocity vector in the vertical direction.
+        # The direction is such that the aircraft with the higher climb/descent
+        # rate reduces it. Scalar if/else instead of np.where because
+        # np.where evaluates both branches and warns on the masked 0/0 cases
+        # (vrel[2]==0 in the true branch, tsolV==0 in either).
+        if tsolV <= 0.0:
+            # Aircraft already at LOS in the vertical channel — no useful
+            # resolution this step; the dh clamp downstream catches stragglers.
+            dv3 = 0.0
+        elif abs(vrel[2]) > 0.0:
+            dv3 = (iV / tsolV) * (-vrel[2] / abs(vrel[2]))
+        else:
+            dv3 = iV / tsolV
 
         # It is necessary to cap dv3 to prevent that a vertical conflict
         # is solved in 1 timestep, leading to a vertical separation that is too
@@ -402,3 +415,49 @@ class MVP2NAT(ConflictResolution):
         dv = np.array([dv1, dv2, dv3])
 
         return dv, tsolV
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain-specific derived classes for resolver comparison studies.
+# Each only differs from MVP2NAT in __init__ defaults. They exist because
+# RMETHH2NAT / RMETHV2NAT silently fail (see MVP2NAT docstring), so domain
+# selection must be done at class level. Activate via RESO MVP2NAT_<DOMAIN>.
+# ─────────────────────────────────────────────────────────────────────────────
+class MVP2NAT_VERT(MVP2NAT):
+    ''' Vertical-only resolution (same as MVP2NAT default). '''
+    def __init__(self):
+        super().__init__()
+        self.swresohoriz = False
+        self.swresospd   = False
+        self.swresohdg   = False
+        self.swresovert  = True
+
+
+class MVP2NAT_SPD(MVP2NAT):
+    ''' Horizontal speed-only resolution. '''
+    def __init__(self):
+        super().__init__()
+        self.swresohoriz = True
+        self.swresospd   = True
+        self.swresohdg   = False
+        self.swresovert  = False
+
+
+class MVP2NAT_HDG(MVP2NAT):
+    ''' Horizontal heading-only resolution. '''
+    def __init__(self):
+        super().__init__()
+        self.swresohoriz = True
+        self.swresospd   = False
+        self.swresohdg   = True
+        self.swresovert  = False
+
+
+class MVP2NAT_BOTH(MVP2NAT):
+    ''' Horizontal resolution using both speed and heading. '''
+    def __init__(self):
+        super().__init__()
+        self.swresohoriz = True
+        self.swresospd   = True
+        self.swresohdg   = True
+        self.swresovert  = False

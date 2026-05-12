@@ -99,9 +99,14 @@ def qdrdist(latd1, lond1, latd2, lond2):
     #d    =  2.0 * r * np.arctan2(np.sqrt(root) , np.sqrt(1.0 - root))
     # d =2.*r*np.arcsin(np.sqrt(sin1*sin1 + coslat1*coslat2*sin2*sin2))
 
-    # Corrected to avoid "nan" at westward direction
-    d = r*np.arccos(np.cos(lat1)*np.cos(lat2)*np.cos(lon2-lon1) + \
-                 np.sin(lat1)*np.sin(lat2))
+    # Corrected to avoid "nan" at westward direction.
+    # np.clip guards against floating-point overshoot of [-1, 1] when
+    # the two points are nearly coincident (or antipodal) — without it,
+    # arccos returns NaN and emits a RuntimeWarning.
+    d = r*np.arccos(np.clip(
+            np.cos(lat1)*np.cos(lat2)*np.cos(lon2-lon1)
+            + np.sin(lat1)*np.sin(lat2),
+            -1.0, 1.0))
 
     # Bearing from Ref. http://www.movable-type.co.uk/scripts/latlong.html
 
