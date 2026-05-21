@@ -3,10 +3,13 @@
     the near-ceiling climb-into-PZ case it targeted does not appear in the NAT
     scenario, and the trigger fired for normal cruise pairs and blocked MVP's
     legitimate vertical separation commands. '''
+from collections import deque
+
 import numpy as np
 import bluesky as bs
 from bluesky import stack
-from bluesky.tools.aero import ft
+from bluesky.tools import geo
+from bluesky.tools.aero import ft, fpm
 from bluesky.traffic.asas import ConflictResolution
 
 
@@ -15,6 +18,16 @@ from bluesky.traffic.asas import ConflictResolution
 # garbage that BADA perf.limits cannot always catch in a useful way.
 _ERRATUM_FLOOR = np.sin(np.radians(15.0))  # ~0.259; caps (alpha-beta) at 75 deg
 _MAX_DH_M = 2000.0 * ft                    # cap |asasalt - ownship.alt|
+
+# ── Heading-fallback configuration ───────────────────────────────────────────
+# All gated by self.swfallbackhdg. When False the fallback path is dead code.
+_FB_MIN_ACTIVE_S   = 90.0          # min continuous ASAS-active time before fire
+_FB_DCPA_WINDOW    = (25.0, 60.0)  # look-back window for "dcpa decreasing" check
+_FB_HOLD_S         = 60.0          # how long the heading offset is held
+_FB_OFFSET_DEG     = 5.0           # magnitude of heading offset
+_FB_VS_REL_THR     = 300.0 * fpm   # |vs_rel| threshold for class A [m/s]
+_FB_DALT_THR       = 500.0 * ft    # dalt threshold for class A [m]
+_FB_INTRAIL_ANGLE  = 15.0          # max relative-track angle for class D [deg]
 
 
 class MVP2NAT(ConflictResolution):
@@ -41,6 +54,35 @@ class MVP2NAT(ConflictResolution):
         self.swresospd = False
         self.swresohdg = False
         self.swresovert = True
+
+        # Opt-in heading-fallback on top of vertical resolution. When False
+        # the pure-vertical code path is byte-equivalent to legacy mvp2nat
+        # (aside from the resumenav waypoint-snap fix). See MVP2NAT_HYBRID.
+        self.swfallbackhdg = False
+
+        # Heading-fallback state. Keyed by callsign so aircraft index
+        # compaction on traf.delete() does not corrupt entries.
+        # _asas_active_start[cs] = sim time when the aircraft most recently
+        # entered ASAS-active state continuously (cleared when it drops out
+        # of the conflict list).
+        # _dcpa_history[frozenset((ac1, ac2))] = deque[(simt, dabsH)] for the
+        # past _FB_DCPA_WINDOW[1] seconds. Used for the "dcpa still
+        # decreasing" gate.
+        # _fired = set of (ownship_callsign, frozenset(pair)) — guarantees the
+        # fallback fires at most once per (aircraft, conflict pair).
+        # _fallback_state[cs] = {'until': simt, 'hdg': deg} for aircraft
+        # currently holding a fallback heading offset.
+        self._asas_active_start = {}
+        self._dcpa_history = {}
+        self._fired = set()
+        self._fallback_state = {}
+
+    def reset(self):
+        super().reset()
+        self._asas_active_start.clear()
+        self._dcpa_history.clear()
+        self._fired.clear()
+        self._fallback_state.clear()
 
     def setprio(self, flag=None, priocode=''):
         '''Set the prio switch and the type of prio '''
@@ -127,6 +169,39 @@ class MVP2NAT(ConflictResolution):
             return np.zeros(bs.traf.ntraf, dtype=bool)
         return self.active
 
+    @property
+    def hdgactive(self):
+        ''' When swfallbackhdg is OFF this returns the base behaviour
+            (self.active). When ON, heading is ASAS-controlled ONLY while
+            the 60 s fallback hold is in progress for that aircraft — outside
+            the hold window the FMS owns the heading channel, so the aircraft
+            navigates to its next waypoint as soon as the offset expires. '''
+        if not self.swfallbackhdg:
+            return super().hdgactive
+        arr = np.zeros(bs.traf.ntraf, dtype=bool)
+        now = bs.sim.simt
+        for cs, st in self._fallback_state.items():
+            if now < st['until']:
+                idx = bs.traf.id2idx(cs)
+                if idx >= 0:
+                    arr[idx] = True
+        return arr
+
+    @property
+    def fallback_hdg_active(self):
+        ''' Per-aircraft boolean: True while heading fallback offset is held.
+            Always False when swfallbackhdg is OFF. Surfaced for loggerff_asas. '''
+        arr = np.zeros(bs.traf.ntraf, dtype=bool)
+        if not self.swfallbackhdg:
+            return arr
+        now = bs.sim.simt
+        for cs, st in self._fallback_state.items():
+            if now < st['until']:
+                idx = bs.traf.id2idx(cs)
+                if idx >= 0:
+                    arr[idx] = True
+        return arr
+
     def applyprio(self, dv_mvp, dv1, dv2, vs1, vs2):
         ''' Apply the desired priority setting to the resolution '''
 
@@ -203,6 +278,10 @@ class MVP2NAT(ConflictResolution):
         # Initialize an array to store time needed to resolve vertically
         timesolveV = np.ones(ownship.ntraf) * 1e9
 
+        # Heading-fallback bookkeeping: ownship callsigns currently in conflict.
+        in_conflict_now = set()
+        fb_enabled = self.swfallbackhdg and self.swresovert
+
         # Call MVP function to resolve conflicts-----------------------------------
         for ((ac1, ac2), qdr, dist, tcpa, tLOS) in zip(conf.confpairs, conf.qdr, conf.dist, conf.tcpa, conf.tLOS):
             idx1 = ownship.id.index(ac1)
@@ -211,7 +290,7 @@ class MVP2NAT(ConflictResolution):
             # If A/C indexes are found, then apply MVP on this conflict pair
             # Because ADSB is ON, this is done for each aircraft separately
             if idx1 >-1 and idx2 > -1:
-                dv_mvp, tsolV = self.MVP(ownship, intruder, conf, qdr, dist, tcpa, tLOS, idx1, idx2)
+                dv_mvp, tsolV, dabsH = self.MVP(ownship, intruder, conf, qdr, dist, tcpa, tLOS, idx1, idx2)
                 if tsolV < timesolveV[idx1]:
                     timesolveV[idx1] = tsolV
 
@@ -231,6 +310,18 @@ class MVP2NAT(ConflictResolution):
                 # Check the resooff aircraft. These aircraft will not do resolutions.
                 if self.resooffac[idx1]:
                     dv[idx1] = 0.0
+
+                # Heading fallback (only enabled in vert + swfallbackhdg mode)
+                if fb_enabled:
+                    in_conflict_now.add(ac1)
+                    self._update_dcpa_history(ac1, ac2, dabsH)
+                    self._maybe_fire_fallback(
+                        ownship, intruder, ac1, ac2, idx1, idx2, qdr, dabsH, conf)
+
+        # Maintain continuous-ASAS-active timers and prune stale per-pair state
+        if fb_enabled:
+            self._update_active_timers(in_conflict_now)
+            self._purge_stale_state(in_conflict_now)
 
 
         # Determine new speed and limit resolution direction for all aicraft-------
@@ -313,6 +404,20 @@ class MVP2NAT(ConflictResolution):
         # using the auto pilot vertical speed (ownship.avs) using the code in line 106 (asasalttemp) when only
         # horizontal resolutions are allowed.
         alt = alt * (1 - self.swresohoriz) + ownship.selalt * self.swresohoriz
+
+        # Heading-fallback override: aircraft currently within the 60 s hold
+        # window get their commanded track replaced by the stored offset. The
+        # vertical channel is left untouched, so MVP keeps trying to build
+        # vertical separation in parallel.
+        if fb_enabled and self._fallback_state:
+            now = bs.sim.simt
+            newtrack = np.array(newtrack, dtype=float, copy=True)
+            for cs, st in self._fallback_state.items():
+                if now < st['until']:
+                    idx = bs.traf.id2idx(cs)
+                    if idx >= 0:
+                        newtrack[idx] = st['hdg']
+
         return newtrack, allowed_tas, vscapped, alt
 
     def MVP(self, ownship, intruder, conf, qdr, dist, tcpa, tLOS, idx1, idx2):
@@ -414,7 +519,241 @@ class MVP2NAT(ConflictResolution):
         # combine the dv components
         dv = np.array([dv1, dv2, dv3])
 
-        return dv, tsolV
+        # dabsH is returned so resolve() can feed it into the heading-fallback
+        # dcpa-trend tracker. Stock MVP discards it after the local branch.
+        return dv, tsolV, dabsH
+
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Recovery — snap past waypoints that were overflown during the maneuver
+    # ─────────────────────────────────────────────────────────────────────────
+    def resumenav(self, conf, ownship, intruder):
+        ''' Mirror of the base implementation, with one addition: when an
+            aircraft transitions out of ASAS-active state, we walk the FMS
+            forward past any waypoints that lie behind the aircraft along
+            the current route segment. This prevents a backward turn after
+            a sustained vertical maneuver carries the aircraft past its
+            "active" waypoint while the FMS still pointed at it.
+
+            Constraint motivation: in conftest.scn every waypoint carries
+            altitude and speed constraints (granular cruise climb), so a
+            "do not skip constrained waypoints" rule would disable this fix
+            entirely. We deliberately do skip — the next waypoint's
+            constraints become active on direct() and cruise-climb
+            continuity is preserved by the FMS. '''
+        self.resopairs.update(conf.confpairs)
+
+        delpairs = set()
+        changeactive = dict()
+
+        def anglediff(a, b):
+            d = a - b
+            if d > 180:
+                return anglediff(a, b + 360)
+            elif d < -180:
+                return anglediff(a + 360, b)
+            return d
+
+        for conflict in self.resopairs:
+            idx1, idx2 = bs.traf.id2idx(conflict)
+            if idx1 < 0:
+                delpairs.add(conflict)
+                continue
+
+            if idx2 >= 0:
+                re = 6371000.
+                dist = re * np.array([np.radians(intruder.lon[idx2] - ownship.lon[idx1]) *
+                                      np.cos(0.5 * np.radians(intruder.lat[idx2] +
+                                                              ownship.lat[idx1])),
+                                      np.radians(intruder.lat[idx2] - ownship.lat[idx1])])
+
+                vrel = np.array([intruder.gseast[idx2] - ownship.gseast[idx1],
+                                 intruder.gsnorth[idx2] - ownship.gsnorth[idx1]])
+
+                past_cpa = np.dot(dist, vrel) > 0.0
+
+                rpz = np.max(conf.rpz[[idx1, idx2]])
+                hdist = np.linalg.norm(dist)
+                hor_los = hdist < rpz
+
+                is_bouncing = \
+                    abs(anglediff(ownship.trk[idx1], intruder.trk[idx2])) < 30.0 and \
+                    hdist < rpz * self.resofach
+
+            if idx2 >= 0 and (not past_cpa or hor_los or is_bouncing):
+                changeactive[idx1] = True
+            else:
+                changeactive[idx1] = changeactive.get(idx1, False)
+                delpairs.add(conflict)
+
+        for idx, active in changeactive.items():
+            self.active[idx] = active
+            if not active:
+                # Snap the FMS to a waypoint that is ahead of the aircraft
+                # along the current route segment. _advance_past_overflown
+                # walks chains of overflown waypoints; in the typical NAT case
+                # zero or one waypoints are skipped.
+                self._advance_past_overflown(idx)
+
+        self.resopairs -= delpairs
+
+    def _advance_past_overflown(self, idx):
+        ''' Find the next FMS-active waypoint, then keep advancing while it
+            lies behind the aircraft along the route segment (signed
+            along-track distance < 0). The first call mirrors the base
+            class's findact + direct sequence, so behaviour is identical
+            for aircraft that have not overflown their target. '''
+        acrte = bs.traf.ap.route[idx]
+        iwpid = acrte.findact(idx)
+        if iwpid == -1:
+            return
+        acrte.direct(idx, acrte.wpname[iwpid])
+
+        # Walk forward through any chain of overflown waypoints. Cap at the
+        # route length so a malformed route can't loop indefinitely.
+        for _ in range(acrte.nwp):
+            iact = acrte.iactwp
+            if iact < 0 or iact >= acrte.nwp - 1:
+                return  # no next waypoint to advance to
+            # Bearing of the segment leading TO the active waypoint.
+            # If no previous waypoint exists, fall back to aircraft track.
+            if iact > 0:
+                qdr_leg, _ = geo.qdrdist(
+                    acrte.wplat[iact - 1], acrte.wplon[iact - 1],
+                    acrte.wplat[iact],     acrte.wplon[iact])
+            else:
+                qdr_leg = bs.traf.trk[idx]
+            # Bearing from aircraft to the active waypoint.
+            qdr_to_wp, _ = geo.qdrdist(
+                bs.traf.lat[idx], bs.traf.lon[idx],
+                acrte.wplat[iact], acrte.wplon[iact])
+            # Signed along-track sign: if |delta| > 90 deg, the waypoint is
+            # behind us projected onto the segment direction.
+            delta = abs(((qdr_to_wp - qdr_leg + 180.0) % 360.0) - 180.0)
+            if delta > 90.0:
+                acrte.direct(idx, acrte.wpname[iact + 1])
+            else:
+                return
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Heading-fallback helpers (Task 2). All dead code when swfallbackhdg=False.
+    # ─────────────────────────────────────────────────────────────────────────
+    def _update_dcpa_history(self, ac1, ac2, dabsH):
+        ''' Append (simt, dabsH) for this pair, prune anything older than
+            _FB_DCPA_WINDOW[1] seconds. Symmetric in (ac1, ac2) via frozenset. '''
+        key = frozenset((ac1, ac2))
+        hist = self._dcpa_history.get(key)
+        if hist is None:
+            hist = deque()
+            self._dcpa_history[key] = hist
+        now = bs.sim.simt
+        hist.append((now, dabsH))
+        cutoff = now - _FB_DCPA_WINDOW[1]
+        while hist and hist[0][0] < cutoff:
+            hist.popleft()
+
+    def _dcpa_decreasing(self, ac1, ac2, dabsH_now):
+        ''' True if a sample exists in the 25–60 s look-back window that is
+            larger than the current dcpa, i.e. the pair is still closing. '''
+        key = frozenset((ac1, ac2))
+        hist = self._dcpa_history.get(key)
+        if not hist:
+            return False
+        oldest_age = bs.sim.simt - _FB_DCPA_WINDOW[0]  # most recent allowed age
+        # Find the most recent entry that is at least _FB_DCPA_WINDOW[0] old.
+        for t, val in reversed(hist):
+            if t <= oldest_age:
+                return dabsH_now < val
+        return False
+
+    def _update_active_timers(self, in_conflict_now):
+        ''' Start a continuous-active timer when an aircraft enters the
+            conflict list; clear it when it leaves. '''
+        now = bs.sim.simt
+        for cs in in_conflict_now:
+            if cs not in self._asas_active_start:
+                self._asas_active_start[cs] = now
+        for cs in list(self._asas_active_start.keys()):
+            if cs not in in_conflict_now:
+                del self._asas_active_start[cs]
+
+    def _purge_stale_state(self, in_conflict_now):
+        ''' Drop dcpa histories for pairs no longer being computed this tick,
+            and expire fallback_state entries past their hold time. Cleans up
+            references to deleted aircraft as a side effect. '''
+        now = bs.sim.simt
+        # dcpa history: drop any pair where at least one member is not in the
+        # current conflict list OR no longer exists in traf.
+        active_pairs = {frozenset((ac1, ac2))
+                        for (ac1, ac2) in bs.traf.cd.confpairs}
+        for key in list(self._dcpa_history.keys()):
+            if key not in active_pairs:
+                del self._dcpa_history[key]
+        # Fallback state: drop entries whose hold window has ended.
+        for cs in list(self._fallback_state.keys()):
+            if now >= self._fallback_state[cs]['until']:
+                del self._fallback_state[cs]
+        # Fired set: drop entries whose pair is no longer active. This means
+        # the same aircraft can fire fallback again if a *new* conflict with
+        # the same other aircraft materialises later, but cannot fire twice
+        # for the same continuous conflict — which is what we want.
+        for (cs, key) in list(self._fired):
+            if key not in active_pairs:
+                self._fired.discard((cs, key))
+
+    def _maybe_fire_fallback(self, ownship, intruder, ac1, ac2,
+                              idx1, idx2, qdr_deg, dabsH, conf):
+        ''' Evaluate the 5-criterion trigger from the spec. Fires once per
+            (ownship, conflict pair). The ±5° offset is chosen so that the
+            perpendicular component of the resulting velocity points AWAY
+            from the intruder. '''
+        now = bs.sim.simt
+        pair_key = frozenset((ac1, ac2))
+
+        # 5. Already fired for this (aircraft, pair).
+        if (ac1, pair_key) in self._fired:
+            return
+        # Already inside a hold window — no second trigger while held.
+        if ac1 in self._fallback_state:
+            return
+
+        # 1. Continuous ASAS-active ≥ 90 s.
+        start = self._asas_active_start.get(ac1)
+        if start is None or (now - start) < _FB_MIN_ACTIVE_S:
+            return
+
+        # 2. dcpa still decreasing.
+        if not self._dcpa_decreasing(ac1, ac2, dabsH):
+            return
+
+        # 3. No useful vertical separation has formed: |dalt| < HPZ.
+        hpz_m = np.max(conf.hpz[[idx1, idx2]])
+        dalt_now = abs(intruder.alt[idx2] - ownship.alt[idx1])
+        if dalt_now >= hpz_m:
+            return
+
+        # 4. Class A (vertical convergence) or D (in-trail same-FL).
+        rel_trk = abs(((ownship.trk[idx1] - intruder.trk[idx2] + 180.0) % 360.0) - 180.0)
+        is_class_D = rel_trk < _FB_INTRAIL_ANGLE
+        vs_rel = abs(intruder.vs[idx2] - ownship.vs[idx1])
+        is_class_A = vs_rel > _FB_VS_REL_THR and dalt_now > _FB_DALT_THR
+        if not (is_class_A or is_class_D):
+            return
+
+        # Action — choose offset sign so velocity perpendicular component
+        # points away from the intruder. Cross product (z-component) of
+        # ownship velocity dir × intruder bearing dir gives sin(trk - qdr):
+        #   > 0 → intruder is to the LEFT  → turn RIGHT (offset = +5°)
+        #   < 0 → intruder is to the RIGHT → turn LEFT  (offset = -5°)
+        cross = np.sin(np.radians(ownship.trk[idx1] - qdr_deg))
+        sign = +1.0 if cross > 0.0 else -1.0
+        new_hdg = (ownship.trk[idx1] + sign * _FB_OFFSET_DEG) % 360.0
+
+        self._fallback_state[ac1] = {
+            'until': now + _FB_HOLD_S,
+            'hdg':   new_hdg,
+        }
+        self._fired.add((ac1, pair_key))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -461,3 +800,18 @@ class MVP2NAT_BOTH(MVP2NAT):
         self.swresospd   = True
         self.swresohdg   = True
         self.swresovert  = False
+
+
+class MVP2NAT_HYBRID(MVP2NAT):
+    ''' Vertical-primary resolution + opt-in ±5° heading-fallback after a
+        90 s ASAS-active period if dcpa is still decreasing, |dalt| < HPZ,
+        and the geometry is class A (vertical convergence) or class D
+        (near in-trail). Targets the residual LoS clusters that pure
+        vertical leaves behind. '''
+    def __init__(self):
+        super().__init__()
+        self.swresohoriz   = False
+        self.swresospd     = False
+        self.swresohdg     = False
+        self.swresovert    = True
+        self.swfallbackhdg = True

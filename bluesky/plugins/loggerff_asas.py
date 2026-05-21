@@ -48,6 +48,7 @@ flstheader = (
     'track,'
     # --- ASAS diagnostic columns ---
     'asas_active,'          # bool: is ASAS controlling this aircraft?
+    'asas_fallback_hdg,'    # bool: heading-fallback offset currently held (mvp2nat hybrid mode)
     'asas_trk,'             # [deg] ASAS-commanded track
     'asas_tas,'             # [kts] ASAS-commanded TAS
     'asas_vs,'              # [fpm] ASAS-commanded VS
@@ -626,6 +627,8 @@ class LoggerffAsas(Entity):
             traf.trk[:n],                                   # track [deg]
             # --- ASAS diagnostic columns ---
             traf.cr.active[:n].astype(int),                 # asas_active [0/1]
+            (getattr(traf.cr, 'fallback_hdg_active',
+                     np.zeros(n, dtype=bool))[:n]).astype(int),  # asas_fallback_hdg [0/1]
             traf.cr.trk[:n],                                # asas_trk [deg]
             traf.cr.tas[:n] / kts,                          # asas_tas [kts]
             traf.cr.vs[:n] / fpm,                           # asas_vs [fpm]
