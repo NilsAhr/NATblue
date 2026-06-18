@@ -1,0 +1,21 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: NATBlue
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Nils
+    family-names: Ahrenhold
+    email: nils.ahrenhold@dlr.de
+    affiliation: German Aerospace Center; TU Delft
+    orcid: 'https://orcid.org/0000-0001-8731-8959'
+repository-code: 'https://github.com/NilsAhr/NATBlue'
+repository: 'https://github.com/TUDelft-CNS-ATM/bluesky'
+abstract: >-
+  BlueSky extension for North Atlantic Air Traffic
+  Management Modelling
+license: MIT

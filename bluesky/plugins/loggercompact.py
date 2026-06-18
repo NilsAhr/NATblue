@@ -220,8 +220,8 @@ class LoggerCompact(Entity):
             for idx in sorted(to_delete, reverse=True):
                 cs = traf.id[idx]
                 traf.delete(idx)
-                print(f"COMPACT LOGGER - {self.sim_name}: {cs} landed at {sim.simt}; "
-                      f"active aircraft: {traf.ntraf}")
+                # print(f"COMPACT LOGGER - {self.sim_name}: {cs} landed at {sim.simt}; "
+                #       f"active aircraft: {traf.ntraf}")
 
             # Safety net: delete zombie aircraft that have been flying
             # longer than 24 h or have invalid coordinates.
@@ -383,5 +383,5 @@ class LoggerCompact(Entity):
 
         old_mass = traf.perf.mass[idx]
         traf.perf.mass[idx] = mass_kg
-        print(f'SETMASS {acid}: Mass set from {old_mass:.1f} kg to {mass_kg:.1f} kg')
+        # print(f'SETMASS {acid}: Mass set from {old_mass:.1f} kg to {mass_kg:.1f} kg')
         return True, f'SETMASS {acid}: Mass set to {mass_kg:.1f} kg (was {old_mass:.1f} kg).'
