@@ -29,7 +29,7 @@ datadir = Path('')
 
 def init_plugin():
     global datadir
-    datadir = bs.resource(bs.settings.data_path) / 'NetCDF'
+    datadir = bs.resource(bs.settings.data_path)
 
     if not datadir.is_dir():
         datadir.mkdir()
