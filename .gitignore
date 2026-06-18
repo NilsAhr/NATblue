@@ -25,6 +25,13 @@ venv
 # weather
 data/
 
+# Claude Code — personal local overrides (machine-specific paths, personal notes)
+CLAUDE.local.md
+CLAUDE.md
+# Claude Code — local settings (personal tool permissions, not for sharing)
+.claude/settings.local.json
+.claude/
+
 # PyBuilder
 target/
 

@@ -4,7 +4,7 @@ Created on 2025 Sep
 """
 from random import randint
 import numpy as np
-# Import the global bluesky objects. Uncomment the ones you need
+# Import the global bluesky objects
 from bluesky import core, stack, traf, sim, navdb  #settings, scr, tools
 from bluesky.core import Entity
 from bluesky.tools import datalog, geo
@@ -90,7 +90,7 @@ confheader = \
     'intrusion' + '\n'
 
 
-### Initialization function of your plugin. Do not change the name of this
+### Initialization function of plugin. Do not change the name of this
 ### function, as it is the way BlueSky recognises this file as a plugin.
 def init_plugin():
     ''' Plugin initialisation function. '''
@@ -100,7 +100,7 @@ def init_plugin():
 
     # Configuration parameters
     config = {
-        # The name of your plugin
+        # The name of plugin
         'plugin_name':     'LOGGERFF',
 
         # The type of this plugin. For now, only simulation plugins are possible.
