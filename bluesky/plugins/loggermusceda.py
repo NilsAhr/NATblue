@@ -72,7 +72,7 @@ def init_plugin():
 # ---------------------------------------------------------------------------
 # Logger entity
 # ---------------------------------------------------------------------------
-class loggerMusceda(Entity):
+class LoggerMusceda(Entity):
     """Compact logger: logs only the columns needed for postprocessing."""
 
     def __init__(self):
