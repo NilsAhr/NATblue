@@ -303,6 +303,7 @@ class LoggerMusceda(Entity):
                     self.dist[cpf] / nm,
                     int(self.intrusion_occurred[cpf])
                 )
+                del self.duration[pair]
 
         # ---------------------------------------------------------------
         # 5. COMPACT FLIGHT-STATE LOGGING  (13 columns)
