@@ -1,10 +1,6 @@
 """ BlueSky loggerff_asas — extended flight-state & conflict logger
     with ASAS diagnostic columns for NAT CD&R testing.
-
-    Extends loggerff with per-aircraft ASAS state, conflict geometry,
-    resolution dimension tracking, and performance-margin columns so
-    that Phase 0-5 ASAS testing can be diagnosed from the logs alone.
-
+    
     Created 2026-04
     @author: ahre_ni, Nils Ahrenhold
 """
