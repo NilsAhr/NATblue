@@ -19,6 +19,15 @@ from bluesky.traffic.asas import ConflictResolution
 _ERRATUM_FLOOR = np.sin(np.radians(15.0))  # ~0.259; caps (alpha-beta) at 75 deg
 _MAX_DH_M = 2000.0 * ft                    # cap |asasalt - ownship.alt|
 
+# ── Co-altitude vertical symmetry breaker (ported from mvp_nat.MVPNAT) ────────
+# When two aircraft are at ~the same flight level, the relative vertical speed
+# carries no usable sign, so the plain MVP formula hands BOTH aircraft the same
+# dv3 sign (both descend) and never separates them. Below _VREL_VERT_FLOOR we
+# instead assign climb/descend deterministically by aircraft index.
+_VREL_VERT_FLOOR     = 0.1          # m/s (~20 fpm): below this, treat pair as co-altitude
+_SYM_BREAK_TSOLV_MAX = 60.0         # s: cap on vertical solve-time in the degenerate case
+_CEIL_MARGIN_M       = 500.0 * ft   # keep the aircraft assigned to climb this far below its ceiling
+
 # ── Heading-fallback configuration ───────────────────────────────────────────
 # All gated by self.swfallbackhdg. When False the fallback path is dead code.
 _FB_MIN_ACTIVE_S   = 90.0          # min continuous ASAS-active time before fire
@@ -476,34 +485,55 @@ class MVP2NAT(ConflictResolution):
             dv2 = (iH * dcpa[1]) / (abs(tcpa) * dabsH)
 
         # Vertical resolution------------------------------------------------------
-
-        # Compute the  vertical intrusion
-        # Amount of vertical intrusion dependent on vertical relative velocity
-        iV = hpz_m if abs(vrel[2]) > 0.0 else hpz_m - abs(drel[2])
-
-        # Get the time to solve the conflict vertically - tsolveV
-        tsolV = abs(drel[2] / vrel[2]) if abs(vrel[2]) > 0.0 else tLOS
-
-        # If the time to solve the conflict vertically is longer than the look-ahead time,
-        # because the the relative vertical speed is very small, then solve the intrusion
-        # within tinconf
-        if tsolV > dtlook:
-            tsolV = tLOS
+        # Two regimes, split on the relative vertical speed:
+        #   |vrel[2]| >  _VREL_VERT_FLOOR : normal MVP — the direction comes from
+        #                                   the sign of the closing vertical rate.
+        #   |vrel[2]| <= _VREL_VERT_FLOOR : co-altitude degenerate case. The sign
+        #                                   term -vrel[2]/|vrel[2]| is undefined,
+        #                                   so plain MVP hands BOTH aircraft the
+        #                                   same dv3 sign and they never separate.
+        #                                   Use a deterministic symmetry breaker.
+        if abs(vrel[2]) > _VREL_VERT_FLOOR:
+            # --- Normal case: meaningful relative vertical speed ---
             iV    = hpz_m
-
-        # Compute the resolution velocity vector in the vertical direction.
-        # The direction is such that the aircraft with the higher climb/descent
-        # rate reduces it. Scalar if/else instead of np.where because
-        # np.where evaluates both branches and warns on the masked 0/0 cases
-        # (vrel[2]==0 in the true branch, tsolV==0 in either).
-        if tsolV <= 0.0:
-            # Aircraft already at LOS in the vertical channel — no useful
-            # resolution this step; the dh clamp downstream catches stragglers.
-            dv3 = 0.0
-        elif abs(vrel[2]) > 0.0:
-            dv3 = (iV / tsolV) * (-vrel[2] / abs(vrel[2]))
+            tsolV = abs(drel[2] / vrel[2])
+            # If solving vertically would take longer than the look-ahead,
+            # collapse to the horizontal loss-of-separation time instead.
+            if tsolV > dtlook:
+                tsolV = tLOS
+            if tsolV <= 0.0:
+                # Already at LOS vertically — the dh clamp downstream catches it.
+                dv3 = 0.0
+            else:
+                dv3 = (iV / tsolV) * (-vrel[2] / abs(vrel[2]))
         else:
-            dv3 = iV / tsolV
+            # --- Co-altitude symmetry breaker (ported from mvp_nat.MVPNAT) ---
+            # Assign climb/descend deterministically by aircraft index so the two
+            # ordered evaluations of the pair, (A,B) and (B,A), produce OPPOSITE
+            # signs. With the downstream accumulation dv[idx1] -= dv_mvp, the
+            # effective ownship VS is -dv3, so:
+            #   idx1 < idx2 -> dv3 > 0 -> ownship (lower index) DESCENDS
+            #   idx1 > idx2 -> dv3 < 0 -> ownship (higher index) CLIMBS
+            # tsolV is capped at _SYM_BREAK_TSOLV_MAX (not tLOS) so ~1000 ft of
+            # separation can actually build before CPA; a tLOS-based reference is
+            # far too weak (~100 fpm per aircraft).
+            iV    = hpz_m
+            tsolV = min(max(abs(tcpa), 1.0), _SYM_BREAK_TSOLV_MAX)
+            magnitude = iV / tsolV
+            dv3 = magnitude if idx1 < idx2 else -magnitude
+
+            # Ceiling guard: the aircraft assigned to CLIMB (the higher index)
+            # must not be driven above its service ceiling. If it is already
+            # within _CEIL_MARGIN_M of the ceiling, flip the pair so the climber
+            # descends and its partner climbs instead. Evaluated identically in
+            # both orderings, so the flip stays consistent across (A,B)/(B,A).
+            if idx1 < idx2:
+                climber, climber_idx = intruder, idx2
+            else:
+                climber, climber_idx = ownship, idx1
+            ceil = self._service_ceiling(climber, climber_idx)
+            if climber.alt[climber_idx] > ceil - _CEIL_MARGIN_M:
+                dv3 = -dv3
 
         # It is necessary to cap dv3 to prevent that a vertical conflict
         # is solved in 1 timestep, leading to a vertical separation that is too
@@ -522,6 +552,23 @@ class MVP2NAT(ConflictResolution):
         # dabsH is returned so resolve() can feed it into the heading-fallback
         # dcpa-trend tracker. Stock MVP discards it after the local branch.
         return dv, tsolV, dabsH
+
+    @staticmethod
+    def _service_ceiling(ac, idx):
+        ''' Service ceiling [m] for aircraft index idx, used by the co-altitude
+            ceiling guard. Returns the larger of the certified max operating
+            altitude (hmo) and the OPF max altitude (hmax): hmax alone is the
+            MTOW-weight-limited ceiling and can sit below cruise, so taking the
+            max of the two is the safe reference. Falls back to hmax if hmo is
+            unavailable (e.g. a non-BADA performance model). '''
+        hmax = ac.perf.hmax[idx]
+        hmo = getattr(ac.perf, 'hmo', None)
+        if hmo is not None:
+            try:
+                return max(float(hmax), float(hmo[idx]))
+            except (TypeError, IndexError):
+                pass
+        return float(hmax)
 
 
     # ─────────────────────────────────────────────────────────────────────────
