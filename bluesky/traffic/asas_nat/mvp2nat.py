@@ -34,6 +34,17 @@ _CEIL_MARGIN_M       = 500.0 * ft   # keep the aircraft assigned to climb this f
 # + still-approaching geometry — no tunable time/offset/class constants. All
 # gated by self.swfallbackhdg; when False the fallback path is dead code.
 
+# ── Co-track speed reduction (Stage-C iter 2) ────────────────────────────────
+# The residual worst-day LoS are adjacent-FL co-track pairs (angle<2 deg, vs=0,
+# ~1000 ft = HPZ apart): overtakes (Mach differs) + same-speed parallel locks.
+# No vertical/heading command separates them (already at the HPZ boundary;
+# sin-floor horizontal). Slowing ONE aircraft opens ALONG-TRACK separation,
+# clearing both. MMO-safe (reducing Mach). Gated by self.swspeedcotrack.
+_CT_ANGLE_DEG   = 25.0              # max |trk1-trk2| to count as co-track/parallel
+_CT_VS_FLOOR    = 100.0 * fpm       # both aircraft |vs| below this = level [m/s]
+_CT_DALT_MAX    = 2000.0 * ft       # within 2 FL (catches the 1000 ft adjacent-FL) [m]
+_CT_SPD_FACTOR  = 0.90             # slow the chosen aircraft to this fraction of its TAS
+
 
 class MVP2NAT(ConflictResolution):
     ''' Conflict resolution using the Modified Voltage Potential Method.
@@ -71,9 +82,16 @@ class MVP2NAT(ConflictResolution):
         # index compaction on traf.delete() cannot corrupt entries.
         self._fallback_state = {}
 
+        # Co-track speed reduction (iter 2). When True, populate _speed_state
+        # each tick with {cs: target_TAS} for co-track pairs to slow; applied to
+        # newtas + tasactive. Off by default (base/domain/HYBRID classes).
+        self.swspeedcotrack = False
+        self._speed_state = {}
+
     def reset(self):
         super().reset()
         self._fallback_state.clear()
+        self._speed_state.clear()
 
     def setprio(self, flag=None, priocode=''):
         '''Set the prio switch and the type of prio '''
@@ -155,9 +173,17 @@ class MVP2NAT(ConflictResolution):
             Without this override, tasactive inherits self.active (True for any
             conflicting aircraft), causing aporasas to command a fixed TAS during
             the climb — which raises Mach as altitude increases and produces MMO
-            violations. Returning False here keeps the speed channel with the AP. '''
+            violations. Returning False here keeps the speed channel with the AP,
+            EXCEPT for aircraft the co-track speed reduction is actively slowing
+            this tick (a REDUCTION, so MMO-safe). '''
         if self.swresovert and not self.swresohoriz:
-            return np.zeros(bs.traf.ntraf, dtype=bool)
+            arr = np.zeros(bs.traf.ntraf, dtype=bool)
+            if self.swspeedcotrack:
+                for cs in self._speed_state:
+                    idx = bs.traf.id2idx(cs)
+                    if idx >= 0:
+                        arr[idx] = True
+            return arr
         return self.active
 
     @property
@@ -273,6 +299,8 @@ class MVP2NAT(ConflictResolution):
         # horizontal turn is held through the approach and released past CPA.
         if fb_enabled:
             self._fallback_state = {}
+        if self.swspeedcotrack:
+            self._speed_state = {}
 
         # Call MVP function to resolve conflicts-----------------------------------
         for ((ac1, ac2), qdr, dist, tcpa, tLOS) in zip(conf.confpairs, conf.qdr, conf.dist, conf.tcpa, conf.tLOS):
@@ -309,6 +337,12 @@ class MVP2NAT(ConflictResolution):
                 if fb_enabled:
                     self._eval_horizontal_fallback(
                         ownship, intruder, ac1, ac2, idx1, idx2, dv_mvp, conf)
+
+                # Co-track speed reduction (iter 2): slow one aircraft of a
+                # co-track co-altitude pair to open along-track separation.
+                if self.swspeedcotrack:
+                    self._eval_speed_cotrack(
+                        ownship, intruder, ac1, ac2, idx1, idx2, conf)
 
         # Determine new speed and limit resolution direction for all aicraft-------
 
@@ -356,6 +390,15 @@ class MVP2NAT(ConflictResolution):
             newtrack = (np.arctan2(newv[0,:],newv[1,:])*180/np.pi) %360
             newtas   = np.sqrt(newv[0,:]**2 + newv[1,:]**2)
             newvs    = newv[2,:]
+
+        # Co-track speed override: replace the commanded TAS of aircraft being
+        # slowed this tick with the reduced target (tasactive is True for them).
+        if self.swspeedcotrack and self._speed_state:
+            newtas = np.array(newtas, dtype=float, copy=True)
+            for cs, ttas in self._speed_state.items():
+                idx = bs.traf.id2idx(cs)
+                if idx >= 0:
+                    newtas[idx] = ttas
 
         # Determine ASAS module commands for all aircraft--------------------------
 
@@ -705,6 +748,47 @@ class MVP2NAT(ConflictResolution):
         if prev is None or mag > prev[1]:
             self._fallback_state[ac1] = (new_trk, mag)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Co-track speed reduction (iter 2). Dead code when swspeedcotrack=False.
+    # ─────────────────────────────────────────────────────────────────────────
+    def _eval_speed_cotrack(self, ownship, intruder, ac1, ac2, idx1, idx2, conf):
+        ''' For a co-track (near-parallel, level, within ~2 FL) pair that is
+            still approaching, slow ONE aircraft (the faster; lower callsign if
+            ~equal) to _CT_SPD_FACTOR of its TAS. This opens ALONG-TRACK
+            separation, which is the only thing that clears adjacent-FL co-track
+            conflicts — vertical is stuck at the HPZ boundary and horizontal is
+            sin-floor-degenerate at ~0 deg. A REDUCTION, so it cannot breach MMO.
+            Re-evaluated each tick (held while approaching, released past CPA). '''
+        if self.resooffac[idx1] or self.noresoac[idx2]:
+            return
+        # level: both aircraft near-zero vertical speed
+        if abs(ownship.vs[idx1]) >= _CT_VS_FLOOR or abs(intruder.vs[idx2]) >= _CT_VS_FLOOR:
+            return
+        # within ~2 FL (co-altitude/adjacent-FL, incl. the 1000 ft residual)
+        if abs(intruder.alt[idx2] - ownship.alt[idx1]) >= _CT_DALT_MAX:
+            return
+        # co-track: relative track angle small (parallel / in-trail)
+        rel_trk = abs(((ownship.trk[idx1] - intruder.trk[idx2] + 180.0) % 360.0) - 180.0)
+        if rel_trk >= _CT_ANGLE_DEG:
+            return
+        # still approaching (hold until past CPA)
+        re = 6371000.0
+        dx = re * np.radians(intruder.lon[idx2] - ownship.lon[idx1]) * \
+            np.cos(0.5 * np.radians(intruder.lat[idx2] + ownship.lat[idx1]))
+        dy = re * np.radians(intruder.lat[idx2] - ownship.lat[idx1])
+        dvx = intruder.gseast[idx2] - ownship.gseast[idx1]
+        dvy = intruder.gsnorth[idx2] - ownship.gsnorth[idx1]
+        if (dx * dvx + dy * dvy) > 0.0:
+            return
+        # Choose which aircraft to slow: the faster; lower callsign if ~equal.
+        # Deterministic across both (A,B)/(B,A) orderings of the pair.
+        t1, t2 = float(ownship.tas[idx1]), float(intruder.tas[idx2])
+        if abs(t1 - t2) < 1.0:                      # ~equal speed
+            slow_cs, slow_tas = (ac1, t1) if str(ac1) < str(ac2) else (ac2, t2)
+        else:
+            slow_cs, slow_tas = (ac1, t1) if t1 > t2 else (ac2, t2)
+        self._speed_state[slow_cs] = _CT_SPD_FACTOR * slow_tas
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Domain-specific derived classes for resolver comparison studies.
@@ -753,11 +837,9 @@ class MVP2NAT_BOTH(MVP2NAT):
 
 
 class MVP2NAT_HYBRID(MVP2NAT):
-    ''' Vertical-primary resolution + opt-in ±5° heading-fallback after a
-        90 s ASAS-active period if dcpa is still decreasing, |dalt| < HPZ,
-        and the geometry is class A (vertical convergence) or class D
-        (near in-trail). Targets the residual LoS clusters that pure
-        vertical leaves behind. '''
+    ''' Vertical-primary resolution + MVP-horizontal-vector heading fallback for
+        co-altitude, still-approaching pairs (iter 1 redesign). Targets the
+        residual LoS clusters that pure vertical leaves behind. '''
     def __init__(self):
         super().__init__()
         self.swresohoriz   = False
@@ -765,3 +847,37 @@ class MVP2NAT_HYBRID(MVP2NAT):
         self.swresohdg     = False
         self.swresovert    = True
         self.swfallbackhdg = True
+
+
+class MVP2NAT_HYBRID2(MVP2NAT):
+    ''' Approach A (Stage-C iter 2): H2 hybrid (vertical + MVP-horizontal-vector
+        fallback on all co-altitude approaching pairs) PLUS a co-track speed
+        reduction. Layers the along-track-separation fix for the adjacent-FL
+        co-track residual on top of the working vertical+horizontal channels. '''
+    def __init__(self):
+        super().__init__()
+        self.swresohoriz    = False
+        self.swresospd      = False
+        self.swresohdg      = False
+        self.swresovert     = True
+        self.swfallbackhdg  = True     # broad MVP-horizontal fallback (H2)
+        self.swspeedcotrack = True     # + co-track speed reduction
+
+
+class MVP2NAT_CLUSTER(MVP2NAT):
+    ''' Approach B (Stage-C iter 2): conflict-cluster resolver. Applies the
+        domain that physically fits each conflict class instead of a
+        vertical-primary + secondary trigger: vertical is the default best
+        domain for head-on / crossing / vertical-crossing (Stage-B: IPR>=0.98),
+        and the co-track class (near-parallel, level, adjacent-FL) — which
+        vertical cannot open — is routed to a SPEED reduction that builds
+        along-track separation. NO broad horizontal fallback (heading was never
+        uniquely best for any class). = vertical + targeted co-track speed. '''
+    def __init__(self):
+        super().__init__()
+        self.swresohoriz    = False
+        self.swresospd      = False
+        self.swresohdg      = False
+        self.swresovert     = True
+        self.swfallbackhdg  = False    # no broad horizontal fallback
+        self.swspeedcotrack = True     # co-track class -> speed
