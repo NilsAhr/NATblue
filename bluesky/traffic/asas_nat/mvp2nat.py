@@ -45,6 +45,14 @@ _CT_VS_FLOOR    = 100.0 * fpm       # both aircraft |vs| below this = level [m/s
 _CT_DALT_MAX    = 2000.0 * ft       # within 2 FL (catches the 1000 ft adjacent-FL) [m]
 _CT_SPD_FACTOR  = 0.90             # slow the chosen aircraft to this fraction of its TAS
 
+# ── Co-track FL-hold (iter 3) ────────────────────────────────────────────────
+# The TRAILING aircraft of a sustained co-track pair is held at a fixed FL below
+# the leader AND slowed, until the pair is horizontally clear (> RPZ x release
+# factor). Stable target (no per-tick decrement) => no runaway dive.
+_HOLD_HPZ_MARGIN   = 1.10           # hold the trailing aircraft this x HPZ below the leader
+_HOLD_VS_MAX       = 1500.0 * fpm   # cap the VS used to reach the hold target [m/s]
+_HOLD_RELEASE_FACT = 1.10           # release when horizontal dist > this x RPZ
+
 
 class MVP2NAT(ConflictResolution):
     ''' Conflict resolution using the Modified Voltage Potential Method.
@@ -88,10 +96,20 @@ class MVP2NAT(ConflictResolution):
         self.swspeedcotrack = False
         self._speed_state = {}
 
+        # Co-track FL-hold + speed (iter 3). When swaltholdcotrack is True, a
+        # co-track (sustained same-track cruise-climb competition) pair puts its
+        # TRAILING aircraft into a PERSISTENT hold: fly a fixed lower FL AND slow
+        # down, held until the pair is horizontally clear (> RPZ). Persistent (NOT
+        # rebuilt per tick) so it survives the conflict clearing vertically -> no
+        # rebound. _hold[trailing_cs] = {'partner','alt','tas'}.
+        self.swaltholdcotrack = False
+        self._hold = {}
+
     def reset(self):
         super().reset()
         self._fallback_state.clear()
         self._speed_state.clear()
+        self._hold.clear()
 
     def setprio(self, flag=None, priocode=''):
         '''Set the prio switch and the type of prio '''
@@ -183,8 +201,29 @@ class MVP2NAT(ConflictResolution):
                     idx = bs.traf.id2idx(cs)
                     if idx >= 0:
                         arr[idx] = True
+            if self.swaltholdcotrack:
+                for cs in self._hold:            # trailing aircraft is slowed
+                    idx = bs.traf.id2idx(cs)
+                    if idx >= 0:
+                        arr[idx] = True
             return arr
         return self.active
+
+    @property
+    def altactive(self):
+        ''' Base returns self.active (alt controlled while in conflict). For the
+            co-track FL-hold we ALSO force it True for held (trailing) aircraft
+            even after the conflict clears vertically, so the AP cannot climb them
+            back into the conflict (rebound) before they are horizontally clear. '''
+        base = self.active
+        if not self.swaltholdcotrack or not self._hold:
+            return base
+        arr = np.array(base, dtype=bool, copy=True)
+        for cs in self._hold:
+            idx = bs.traf.id2idx(cs)
+            if idx >= 0:
+                arr[idx] = True
+        return arr
 
     @property
     def hdgactive(self):
@@ -344,6 +383,19 @@ class MVP2NAT(ConflictResolution):
                     self._eval_speed_cotrack(
                         ownship, intruder, ac1, ac2, idx1, idx2, conf)
 
+                # Co-track FL-hold + speed (iter 3): put the TRAILING aircraft of a
+                # sustained co-track pair into a persistent hold (fixed lower FL +
+                # slow) so both eventually reach optimal FL without LoS/runaway.
+                if self.swaltholdcotrack:
+                    self._eval_althold_cotrack(
+                        ownship, intruder, ac1, ac2, idx1, idx2, conf)
+
+        # Maintain the persistent co-track hold: refresh targets, release pairs
+        # that are now horizontally clear (> RPZ). Runs for ALL held aircraft,
+        # including any whose conflict has dropped out of confpairs (rebound guard).
+        if self.swaltholdcotrack:
+            self._maintain_hold(ownship, conf)
+
         # Determine new speed and limit resolution direction for all aicraft-------
 
         # Resolution vector for all aircraft, cartesian coordinates
@@ -444,6 +496,23 @@ class MVP2NAT(ConflictResolution):
                 idx = bs.traf.id2idx(cs)
                 if idx >= 0:
                     newtrack[idx] = trk
+
+        # Co-track FL-hold override (iter 3): held (trailing) aircraft fly a FIXED
+        # target altitude (bounded VS toward it, so no runaway) and a reduced TAS,
+        # held until horizontally clear. altactive/tasactive are forced True for them.
+        if self.swaltholdcotrack and self._hold:
+            alt = np.array(alt, dtype=float, copy=True)
+            allowed_tas = np.array(allowed_tas, dtype=float, copy=True)
+            vscapped = np.array(vscapped, dtype=float, copy=True)
+            for cs, h in self._hold.items():
+                idx = bs.traf.id2idx(cs)
+                if idx < 0:
+                    continue
+                alt[idx] = h['alt']
+                allowed_tas[idx] = h['tas']
+                # bounded VS toward the fixed target (reach over ~60 s, capped)
+                vscapped[idx] = np.clip((h['alt'] - ownship.alt[idx]) / 60.0,
+                                        -_HOLD_VS_MAX, _HOLD_VS_MAX)
 
         return newtrack, allowed_tas, vscapped, alt
 
@@ -719,6 +788,10 @@ class MVP2NAT(ConflictResolution):
         # Respect noreso / resooff exactly as the vertical channel does.
         if self.resooffac[idx1] or self.noresoac[idx2]:
             return
+        # Don't ALSO turn an aircraft already under co-track FL-hold+speed (the
+        # turn interferes with the along-track speed separation — iter-2 finding).
+        if self.swaltholdcotrack and (ac1 in self._hold or ac2 in self._hold):
+            return
         # (a) co-altitude gate: only step in while vertical has NOT built HPZ.
         hpz_m = np.max(conf.hpz[[idx1, idx2]])
         if abs(intruder.alt[idx2] - ownship.alt[idx1]) >= hpz_m:
@@ -788,6 +861,70 @@ class MVP2NAT(ConflictResolution):
         else:
             slow_cs, slow_tas = (ac1, t1) if t1 > t2 else (ac2, t2)
         self._speed_state[slow_cs] = _CT_SPD_FACTOR * slow_tas
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Co-track FL-hold + speed (iter 3). Dead code when swaltholdcotrack=False.
+    # ─────────────────────────────────────────────────────────────────────────
+    def _eval_althold_cotrack(self, ownship, intruder, ac1, ac2, idx1, idx2, conf):
+        ''' Detect a sustained co-track pair and put its TRAILING aircraft into a
+            PERSISTENT hold (fixed lower FL + reduced TAS). Idempotent: does
+            nothing if either aircraft is already held. Trailing = the one behind
+            along-track (the other is ahead of it in its own velocity direction). '''
+        if self.resooffac[idx1] or self.noresoac[idx2]:
+            return
+        if ac1 in self._hold or ac2 in self._hold:
+            return                                  # already handled
+        # level-ish and co-altitude/adjacent-FL and near-parallel
+        if abs(ownship.vs[idx1]) >= _CT_VS_FLOOR or abs(intruder.vs[idx2]) >= _CT_VS_FLOOR:
+            return
+        if abs(intruder.alt[idx2] - ownship.alt[idx1]) >= _CT_DALT_MAX:
+            return
+        rel_trk = abs(((ownship.trk[idx1] - intruder.trk[idx2] + 180.0) % 360.0) - 180.0)
+        if rel_trk >= _CT_ANGLE_DEG:
+            return
+        # along-track ordering: is the intruder ahead of the ownship?
+        re = 6371000.0
+        dx = re * np.radians(intruder.lon[idx2] - ownship.lon[idx1]) * \
+            np.cos(0.5 * np.radians(intruder.lat[idx2] + ownship.lat[idx1]))
+        dy = re * np.radians(intruder.lat[idx2] - ownship.lat[idx1])
+        ahead = (dx * ownship.gseast[idx1] + dy * ownship.gsnorth[idx1]) > 0.0
+        # trailing aircraft = the one with the other ahead of it (ownship and
+        # intruder are the same ADSB traffic array, so index either via ownship).
+        if ahead:                                   # intruder ahead -> ownship trails
+            trail, trail_i, lead_i = ac1, idx1, idx2
+        else:
+            trail, trail_i, lead_i = ac2, idx2, idx1
+        hpz_m = np.max(conf.hpz[[idx1, idx2]])
+        target_alt = min(ownship.alt[trail_i],
+                         ownship.alt[lead_i] - _HOLD_HPZ_MARGIN * hpz_m)
+        self._hold[trail] = {'partner': ac2 if trail == ac1 else ac1,
+                             'alt': float(target_alt),
+                             'tas': float(_CT_SPD_FACTOR * ownship.tas[trail_i])}
+
+    def _maintain_hold(self, ownship, conf):
+        ''' Refresh each persistent hold and release it once the pair is
+            horizontally clear (> RPZ x release factor). Runs every tick for ALL
+            held aircraft — including pairs no longer in confpairs — so the AP
+            cannot rebound the trailing aircraft into the conflict. '''
+        re = 6371000.0
+        for cs in list(self._hold.keys()):
+            i = bs.traf.id2idx(cs)
+            j = bs.traf.id2idx(self._hold[cs]['partner'])
+            if i < 0 or j < 0:                       # an aircraft left the sim
+                del self._hold[cs]
+                continue
+            dx = re * np.radians(bs.traf.lon[j] - bs.traf.lon[i]) * \
+                np.cos(0.5 * np.radians(bs.traf.lat[j] + bs.traf.lat[i]))
+            dy = re * np.radians(bs.traf.lat[j] - bs.traf.lat[i])
+            hdist = np.hypot(dx, dy)
+            rpz_m = np.max(conf.rpz[[i, j]])
+            if hdist > _HOLD_RELEASE_FACT * rpz_m:   # horizontally clear -> release
+                del self._hold[cs]
+                continue
+            # refresh the target below the (possibly climbed) leader
+            hpz_m = np.max(conf.hpz[[i, j]])
+            self._hold[cs]['alt'] = float(min(self._hold[cs]['alt'],
+                                              bs.traf.alt[j] - _HOLD_HPZ_MARGIN * hpz_m))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -881,3 +1018,24 @@ class MVP2NAT_CLUSTER(MVP2NAT):
         self.swresovert     = True
         self.swfallbackhdg  = False    # no broad horizontal fallback
         self.swspeedcotrack = True     # co-track class -> speed
+
+
+class MVP2NAT_HYBRID3(MVP2NAT):
+    ''' Stage-C iter 3: two-regime resolver. Tactical conflicts (crossing /
+        head-on / vertical-crossing) use the H2 vertical + MVP-horizontal
+        fallback. Sustained CO-TRACK cruise-climb competitions (the residual: two
+        same-track aircraft both VNAV-climbing to the same FL) are handled by a
+        PERSISTENT FL-hold + speed on the TRAILING aircraft: hold it a fixed FL
+        below the leader (stable target -> no runaway dive) and slow it to open
+        along-track separation, with authority over VNAV (forced altactive), held
+        until horizontally clear (> RPZ) so it cannot rebound. The trailing
+        aircraft then climbs + re-accelerates to its optimum behind the leader. '''
+    def __init__(self):
+        super().__init__()
+        self.swresohoriz    = False
+        self.swresospd      = False
+        self.swresohdg      = False
+        self.swresovert     = True
+        self.swfallbackhdg  = True     # tactical: MVP-horizontal fallback (H2)
+        self.swspeedcotrack = False    # co-track handled by FL-hold below, not the iter-2 speed
+        self.swaltholdcotrack = True   # co-track: persistent FL-hold + speed on trailing ac
