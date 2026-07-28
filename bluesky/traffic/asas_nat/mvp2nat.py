@@ -44,6 +44,7 @@ _CT_ANGLE_DEG   = 25.0              # max |trk1-trk2| to count as co-track/paral
 _CT_VS_FLOOR    = 100.0 * fpm       # both aircraft |vs| below this = level [m/s]
 _CT_DALT_MAX    = 2000.0 * ft       # within 2 FL (catches the 1000 ft adjacent-FL) [m]
 _CT_SPD_FACTOR  = 0.90             # slow the chosen aircraft to this fraction of its TAS
+_CT_VSREL_MAX   = 500.0 * fpm      # max |vs1-vs2| to count as co-track (not a fast crossing) [m/s]
 
 # ── Co-track FL-hold (iter 3) ────────────────────────────────────────────────
 # The TRAILING aircraft of a sustained co-track pair is held at a fixed FL below
@@ -874,9 +875,12 @@ class MVP2NAT(ConflictResolution):
             return
         if ac1 in self._hold or ac2 in self._hold:
             return                                  # already handled
-        # level-ish and co-altitude/adjacent-FL and near-parallel
-        if abs(ownship.vs[idx1]) >= _CT_VS_FLOOR or abs(intruder.vs[idx2]) >= _CT_VS_FLOOR:
+        # NOT a fast vertical crossing (that is the tactical regime) — but DO
+        # allow a slowly cruise-climbing trailing aircraft (the residual regime
+        # IS a cruise-climb competition, so requiring both level missed it).
+        if abs(intruder.vs[idx2] - ownship.vs[idx1]) >= _CT_VSREL_MAX:
             return
+        # co-altitude / adjacent-FL and near-parallel
         if abs(intruder.alt[idx2] - ownship.alt[idx1]) >= _CT_DALT_MAX:
             return
         rel_trk = abs(((ownship.trk[idx1] - intruder.trk[idx2] + 180.0) % 360.0) - 180.0)
@@ -918,7 +922,14 @@ class MVP2NAT(ConflictResolution):
             dy = re * np.radians(bs.traf.lat[j] - bs.traf.lat[i])
             hdist = np.hypot(dx, dy)
             rpz_m = np.max(conf.rpz[[i, j]])
-            if hdist > _HOLD_RELEASE_FACT * rpz_m:   # horizontally clear -> release
+            # Release only when the pair is PAST CPA (separating along-track) AND
+            # horizontally clear. During the approach they can be far apart yet
+            # still closing — releasing then lets the trailing ac rebound (bug in
+            # iter 3: released on hdist>RPZ alone before the hold did anything).
+            dvx = bs.traf.gseast[j] - bs.traf.gseast[i]
+            dvy = bs.traf.gsnorth[j] - bs.traf.gsnorth[i]
+            separating = (dx * dvx + dy * dvy) > 0.0
+            if separating and hdist > _HOLD_RELEASE_FACT * rpz_m:
                 del self._hold[cs]
                 continue
             # refresh the target below the (possibly climbed) leader
