@@ -8,10 +8,17 @@ upstream version.
 
 Changes vs. original
 --------------------
-(none yet — exact mirror of NATBlue ``statebased.py`` as of 2026-04-08)
+2026-07-30: ``detect()`` refactored into two reusable helpers WITHOUT any
+change to its numerical output/behaviour:
+  * ``_horizontal(...)``       -> horizontal CPA block (qdr/dist/tcpa/dcpa2,
+                                  swhorconf, tinhor/touthor, rpz matrix, I)
+  * ``_combine_vertical(...)`` -> vertical crossing + combine + conflict lists
+This lets ``IntentBasedNAT`` reuse the horizontal geometry unchanged and swap
+ONLY the vertical window source (see ``intentbased.py``). ``StateBasedNAT``
+itself is bit-for-bit equivalent to the pre-refactor version.
 
 @author : Nils Ahrenhold (ahre_ni)
-@date   : 2026-04
+@date   : 2026-04 (refactor 2026-07)
 """
 import numpy as np
 from bluesky import stack
@@ -33,10 +40,23 @@ class StateBasedNAT(ConflictDetectionNAT):
 
     def detect(self, ownship, intruder, rpz, hpz, dtlookahead):
         """Conflict detection between *ownship* and *intruder*."""
+        H = self._horizontal(ownship, intruder, rpz, dtlookahead)
+        return self._combine_vertical(ownship, intruder, hpz, dtlookahead, H)
+
+    # ------------------------------------------------------------------ #
+    # Horizontal CPA block (reused unchanged by IntentBasedNAT)
+    # ------------------------------------------------------------------ #
+    def _horizontal(self, ownship, intruder, rpz, dtlookahead):
+        """Horizontal closest-point-of-approach geometry for all pairs.
+
+        Returns a dict of the full O(n²) matrices needed by the vertical
+        combine step (and by intent-based detection):
+        ``I, qdr, dist, tcpa, dcpa2, vrel, swhorconf, tinhor, touthor, rpz``.
+        ``dist`` is in metres with 1e9 added on the diagonal; ``rpz`` is the
+        pairwise-max RPZ matrix.
+        """
         # Identity matrix: avoid ownship–ownship pairs
         I = np.eye(ownship.ntraf)
-
-        # === Horizontal conflict ==================================================
 
         qdr, dist = geo.kwikqdrdist_matrix(
             np.asmatrix(ownship.lat), np.asmatrix(ownship.lon),
@@ -78,8 +98,24 @@ class StateBasedNAT(ConflictDetectionNAT):
         tinhor = np.where(swhorconf, tcpa - dtinhor, 1e8)
         touthor = np.where(swhorconf, tcpa + dtinhor, -1e8)
 
-        # === Vertical conflict ====================================================
+        return dict(I=I, qdr=qdr, dist=dist, tcpa=tcpa, dcpa2=dcpa2, vrel=vrel,
+                    swhorconf=swhorconf, tinhor=tinhor, touthor=touthor, rpz=rpz)
 
+    # ------------------------------------------------------------------ #
+    # Vertical crossing + combine + conflict lists
+    # ------------------------------------------------------------------ #
+    def _combine_vertical(self, ownship, intruder, hpz, dtlookahead, H):
+        """State-based vertical window + combine with horizontal window ``H``.
+
+        Identical maths to the original monolithic ``detect()``.
+        """
+        I = H['I']
+        tinhor, touthor = H['tinhor'], H['touthor']
+        swhorconf = H['swhorconf']
+        tcpa, dcpa2 = H['tcpa'], H['dcpa2']
+        qdr, dist, rpz = H['qdr'], H['dist'], H['rpz']
+
+        # === Vertical conflict ====================================================
         dalt = (ownship.alt.reshape((1, ownship.ntraf))
                 - intruder.alt.reshape((1, ownship.ntraf)).T + 1e9 * I)
 
@@ -96,7 +132,6 @@ class StateBasedNAT(ConflictDetectionNAT):
         toutver = np.maximum(tcrosshi, tcrosslo)
 
         # === Combined =============================================================
-
         tinconf = np.maximum(tinver, tinhor)
         toutconf = np.minimum(toutver, touthor)
 
