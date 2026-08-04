@@ -49,7 +49,15 @@ class IntentBasedNAT(StateBasedNAT):
 
     # --- tunables (class constants; no stack commands in v1) ---
     INTENT_DT = 10.0          # [s]   vertical-projection sample step
-    INTENT_DALT_BAND = 2.0    # [×HPZ] only examine pairs within this vertical band now
+    INTENT_DALT_BAND = 1.5    # [×HPZ] only examine pairs within this vertical band now
+    INTENT_CT_ANGLE = 25.0    # [deg] co-track gate: max |Δtrk| (matches mvp2nat _CT_ANGLE_DEG).
+                              #       Restricts intent to the co-track cruise-climb class the
+                              #       FL-hold resolves; excludes the head-on/opposite RVSM mass
+                              #       that caused the iter-1 false-positive explosion.
+    INTENT_HORIZON_S = 180.0  # [s]   imminence cap: flag only convergences within this horizon
+                              #       (NOT the full DTLOOK). The FL-hold pins the trailing in
+                              #       ~60 s, so ~120-180 s lead suffices; capping avoids the
+                              #       excess-early holds that induce secondary conflicts.
     INTENT_MAX_NODES = 400    # safety cap on route nodes scanned per aircraft
 
     def detect(self, ownship, intruder, rpz, hpz, dtlookahead):
@@ -75,8 +83,15 @@ class IntentBasedNAT(StateBasedNAT):
         dalt_now = (ownship.alt.reshape((1, n)) - intruder.alt.reshape((1, n)).T)
         band = np.abs(dalt_now) < (self.INTENT_DALT_BAND * hpz_m)
 
+        # Co-track gate: relative track |Δtrk| wrapped to [0,180], must be small.
+        # This is the primary iter-1 false-positive fix — it excludes head-on /
+        # opposite-direction RVSM traffic that merely passes within the vertical band.
+        trk = np.asarray(ownship.trk, dtype=float)
+        dtrk = np.abs(((trk.reshape((1, n)) - trk.reshape((n, 1)) + 180.0) % 360.0) - 180.0)
+        cotrack = dtrk < self.INTENT_CT_ANGLE
+
         cand = (swhorconf & (tinhor < dtl_col) & (touthor > 0.0)
-                & band & (I < 0.5))
+                & band & cotrack & (I < 0.5))
         ii, jj = np.where(cand)
         if ii.size == 0:
             return base
@@ -102,7 +117,9 @@ class IntentBasedNAT(StateBasedNAT):
             si, sj = schedule(i), schedule(j)
             if si is None or sj is None:
                 continue                              # no vertical intent → state-based only
-            dtl = float(min(dtl_arr[i], dtl_arr[j]))
+            # imminence cap: project only within INTENT_HORIZON_S (not the full DTLOOK),
+            # so the FL-hold engages with just enough lead and we avoid excess-early holds.
+            dtl = float(min(dtl_arr[i], dtl_arr[j], self.INTENT_HORIZON_S))
             res = self._intent_vertical(
                 si, sj, float(ownship.gs[i]), float(ownship.gs[j]),
                 float(hpz_m[i, j]), float(tinhor[i, j]), float(touthor[i, j]), dtl)
