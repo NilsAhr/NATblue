@@ -1,41 +1,39 @@
 """
-intentbased.py — Intent-augmented conflict detection for NAT.
-=============================================================
+intentbased.py — Intent-augmented conflict detection for NAT (EPP-style).
+=========================================================================
 
 ``IntentBasedNAT`` (CDMETHOD ``INTENTBASEDNAT``) extends ``StateBasedNAT`` to
-catch the one conflict class the state-based method structurally misses on
-fuel-optimal NAT traffic: **co-track cruise-climb vertical convergence**.
+catch the conflict class state-based detection structurally misses on
+fuel-optimal NAT traffic: **co-track cruise-climb vertical convergence** (both
+aircraft climbing at ``vs≈0`` toward optima within HPZ → flagged only at LoS by
+velocity-based CD, zero lead). See ``00_paperplanning/06_detection_limitation.md``.
 
-Motivation
-----------
-State-based CD linearly extrapolates each aircraft's *instantaneous* vertical
-speed. Fuel-optimal trajectories cruise-climb at ``vs≈0`` per step, so two
-co-track aircraft at slightly different optimum flight levels are projected as
-staying vertically separated — until the climb has already closed the gap and
-it is instantly a loss of separation (``tinconf == tLOS``, zero lead). See
-``00_paperplanning/06_detection_limitation.md``.
+Design (converged with user 2026-08-05)
+---------------------------------------
+* **UNION, state-based kept as the robust floor.** The full ``StateBasedNAT``
+  result is returned unchanged; intent-detected pairs are *appended* (never
+  removed) — safety cannot decrease.
+* **Intent = broadcast-plan (EPP) motion projection.** For a candidate co-track
+  pair, project BOTH aircraft's MOTION forward over t ∈ [0, ``T_FRAME_S``] from
+  their route (``bs.traf.ap.route`` = the broadcast flight plan / EPP, unchanged
+  by tactical ASAS): horizontal = move direct toward the next waypoint(s) at
+  ground speed; vertical = climb at the PLANNED GRADIENT (current→next ``wpalt``)
+  — instantaneous ``vs``≈0 misses it; perf-max over-predicts; the gradient is
+  accurate and self-bounding (a far waypoint gives a shallow climb). Flag when
+  horizontal < RPZ AND vertical < HPZ **at the same t** (co-location is temporal).
+* **Time-bounded frame** (``T_FRAME_S``, not a waypoint count): a 2-h-away next
+  waypoint falls outside the frame → no over-early trigger. This replaces the old
+  ``tinhor < DTLOOK`` gate that fired late for same-track catch-up pairs.
+* **False-positive guards:** co-track heading gate (|Δtrk| < ``INTENT_CT_ANGLE``),
+  a proximity pre-filter, and **optima-within-HPZ** (if the two target FLs differ
+  by ≥ HPZ the higher climbs clear → never flag).
 
-Approach (locked with user 2026-07-30)
---------------------------------------
-* **Vertical-intent only.** Horizontal geometry stays state-based; the intent
-  pass only re-derives the *vertical* conflict window from planned intent.
-* **UNION (intent adds only).** The full state-based result is returned
-  unchanged; intent-detected pairs are *appended*. Nothing state-based finds
-  is removed.
-* **Intent source = route ``wpalt`` (static, set at spawn).** The fast-changing
-  signals (``selalt``/instantaneous ``vs``) are deliberately NOT used, so intent
-  is a stable look-ahead. The route object is read live each tick, so genuine
-  route edits (waypoint-skipping in recovery, ``DIRECT``) are reflected.
-* **Horizontal reused straight-line** (``StateBasedNAT._horizontal``) — accurate
-  for the near-linear co-track along-track closure.
-
-Two-layer coverage of resolution-altered trajectories: an active resolution
-manoeuvre produces a large ``vs`` / off-route track, which the state-based layer
-catches from the actual state; the intent layer only adds the slow *planned*
-``vs≈0`` climb convergence that state-based misses. Complementary regimes.
+Staleness while an aircraft is under active ASAS control is covered by the
+state-based floor (actual dynamics); the intent layer reads the unchanged plan
+and keeps the co-track hold engaged until horizontal clearance.
 
 @author : Nils Ahrenhold (ahre_ni)
-@date   : 2026-07-30
+@date   : 2026-08-05
 """
 import numpy as np
 
@@ -43,69 +41,57 @@ from bluesky.tools import geo
 from bluesky.tools.aero import nm
 from bluesky.traffic.asas_nat.statebased_nat import StateBasedNAT
 
+_RE = 6371000.0   # earth radius [m] for the flat-earth (kwik) distance
+
 
 class IntentBasedNAT(StateBasedNAT):
-    """State-based CD + planned cruise-climb (route-``wpalt``) vertical intent."""
+    """State-based CD (floor) + EPP-style route motion projection (co-track)."""
 
-    # --- tunables (class constants; no stack commands in v1) ---
-    INTENT_DT = 10.0          # [s]   vertical-projection sample step
-    INTENT_DALT_BAND = 1.5    # [×HPZ] only examine pairs within this vertical band now
-    INTENT_CT_ANGLE = 25.0    # [deg] co-track gate: max |Δtrk| (matches mvp2nat _CT_ANGLE_DEG).
-                              #       Restricts intent to the co-track cruise-climb class the
-                              #       FL-hold resolves; excludes the head-on/opposite RVSM mass
-                              #       that caused the iter-1 false-positive explosion.
-    INTENT_HORIZON_S = 180.0  # [s]   imminence cap: flag only convergences within this horizon
-                              #       (NOT the full DTLOOK). The FL-hold pins the trailing in
-                              #       ~60 s, so ~120-180 s lead suffices; capping avoids the
-                              #       excess-early holds that induce secondary conflicts.
-    INTENT_MAX_NODES = 400    # safety cap on route nodes scanned per aircraft
+    # --- tunables (class constants) ---
+    T_FRAME_S       = 1000.0   # [s]  intent look-ahead frame (~17 min; the
+                               #      earliness/FP knob, matched to the ~30-40 min
+                               #      cruise-climb convergence, time-bounded).
+    INTENT_DT       = 15.0     # [s]  motion-projection sample step.
+    INTENT_CT_ANGLE = 25.0     # [deg] co-track gate |Δtrk| (matches mvp2nat _CT_ANGLE_DEG).
+    D_MAX_NM        = 130.0    # [NM] proximity pre-filter (> max closable in T_FRAME_S).
+    INTENT_MAX_NODES = 400     # safety cap on route nodes scanned per aircraft.
 
     def detect(self, ownship, intruder, rpz, hpz, dtlookahead):
-        # 1. Full state-based result (unchanged) + reusable horizontal geometry.
+        # 1. State-based floor (unchanged) + reusable horizontal geometry.
         H = self._horizontal(ownship, intruder, rpz, dtlookahead)
         base = self._combine_vertical(ownship, intruder, hpz, dtlookahead, H)
+        self._intent_pairs = set()          # frozensets flagged by intent (for logging)
 
         n = ownship.ntraf
         if n < 2:
             return base
-
         (confpairs, lospairs, inconf, tcpamax,
          b_qdr, b_dist, b_dcpa, b_tcpa, b_tinconf, b_mindalt) = base
 
-        # 2. Candidate pre-filter: horizontal breach within lookahead, currently
-        #    within a vertical band, NOT already a state-based conflict.
+        # 2. Candidate pre-filter: co-track + horizontally proximate + not already
+        #    a state-based conflict. (Cheap boolean masks.)
         I = H['I']
-        swhorconf = H['swhorconf']
-        tinhor, touthor = H['tinhor'], H['touthor']
+        dist_now = H['dist']                                    # [m] (+1e9 on diag)
         hpz_m = np.asarray(np.maximum(np.asmatrix(hpz), np.asmatrix(hpz).transpose()))
-        dtl_col = np.asarray(dtlookahead, dtype=float).reshape((n, 1))
-
-        dalt_now = (ownship.alt.reshape((1, n)) - intruder.alt.reshape((1, n)).T)
-        band = np.abs(dalt_now) < (self.INTENT_DALT_BAND * hpz_m)
-
-        # Co-track gate: relative track |Δtrk| wrapped to [0,180], must be small.
-        # This is the primary iter-1 false-positive fix — it excludes head-on /
-        # opposite-direction RVSM traffic that merely passes within the vertical band.
+        rpz_m = H['rpz']
         trk = np.asarray(ownship.trk, dtype=float)
         dtrk = np.abs(((trk.reshape((1, n)) - trk.reshape((n, 1)) + 180.0) % 360.0) - 180.0)
         cotrack = dtrk < self.INTENT_CT_ANGLE
-
-        cand = (swhorconf & (tinhor < dtl_col) & (touthor > 0.0)
-                & band & cotrack & (I < 0.5))
+        prox = dist_now < (self.D_MAX_NM * nm)
+        cand = cotrack & prox & (I < 0.5)
         ii, jj = np.where(cand)
         if ii.size == 0:
             return base
 
         base_set = {frozenset(p) for p in confpairs}
-        dtl_arr = np.asarray(dtlookahead, dtype=float).reshape(-1)
         sched_cache = {}
 
-        def schedule(idx):
+        def sched(idx):
             if idx not in sched_cache:
-                sched_cache[idx] = self._intent_schedule(ownship, idx)
+                sched_cache[idx] = self._route_schedule(ownship, idx)
             return sched_cache[idx]
 
-        add = []   # list of (i, j, tinconf, mindalt)
+        add = []                                     # (i, j, tinconf, min_dalt, dcpa)
         seen = set()
         for i, j in zip(ii.tolist(), jj.tolist()):
             key = (i, j) if i < j else (j, i)
@@ -114,18 +100,18 @@ class IntentBasedNAT(StateBasedNAT):
             seen.add(key)
             if frozenset((ownship.id[i], ownship.id[j])) in base_set:
                 continue
-            si, sj = schedule(i), schedule(j)
+            si, sj = sched(i), sched(j)
             if si is None or sj is None:
-                continue                              # no vertical intent → state-based only
-            # imminence cap: project only within INTENT_HORIZON_S (not the full DTLOOK),
-            # so the FL-hold engages with just enough lead and we avoid excess-early holds.
-            dtl = float(min(dtl_arr[i], dtl_arr[j], self.INTENT_HORIZON_S))
-            res = self._intent_vertical(
-                si, sj, float(ownship.gs[i]), float(ownship.gs[j]),
-                float(hpz_m[i, j]), float(tinhor[i, j]), float(touthor[i, j]), dtl)
+                continue
+            # optima-within-HPZ guard: if the target FLs differ by >= HPZ the
+            # higher climbs clear and they never vertically conflict → skip.
+            if abs(si['target'] - sj['target']) >= float(hpz_m[i, j]):
+                continue
+            res = self._project_pair(si, sj, float(ownship.gs[i]), float(ownship.gs[j]),
+                                     float(rpz_m[i, j]), float(hpz_m[i, j]))
             if res is None:
                 continue
-            add.append((i, j, res[0], res[1]))
+            add.append((i, j) + res)                 # + (tinconf, min_dalt, dcpa)
 
         if not add:
             return base
@@ -140,15 +126,15 @@ class IntentBasedNAT(StateBasedNAT):
         tinc = list(np.atleast_1d(b_tinconf).astype(float))
         mind = list(np.atleast_1d(b_mindalt).astype(float))
 
-        for i, j, tinconf_ij, mindalt_ij in add:
+        for i, j, tinconf_ij, mindalt_ij, dcpa_ij in add:
+            self._intent_pairs.add(frozenset((ownship.id[i], ownship.id[j])))
             g_dist = float(H['dist'][i, j])
-            g_dcpa = float(np.sqrt(H['dcpa2'][i, j]))
             g_tcpa = float(H['tcpa'][i, j])
             for a, b in ((i, j), (j, i)):
                 confpairs.append((ownship.id[a], ownship.id[b]))
-                qdr.append(float(H['qdr'][a, b]))   # bearing is direction-dependent
+                qdr.append(float(H['qdr'][a, b]))
                 dist.append(g_dist)
-                dcpa.append(g_dcpa)
+                dcpa.append(dcpa_ij)                  # projected closest horizontal approach
                 tcpa.append(g_tcpa)
                 tinc.append(tinconf_ij)
                 mind.append(mindalt_ij)
@@ -162,14 +148,19 @@ class IntentBasedNAT(StateBasedNAT):
     # ------------------------------------------------------------------ #
     # Intent helpers
     # ------------------------------------------------------------------ #
-    def _intent_schedule(self, ownship, idx):
-        """Planned altitude-vs-along-route-distance for aircraft ``idx``.
+    def _route_schedule(self, ownship, idx):
+        """Broadcast-plan (EPP) schedule for aircraft ``idx`` as a function of
+        cumulative along-route distance from its CURRENT position.
 
-        Node 0 = current position/altitude; subsequent nodes = route waypoints
-        with a *specified* ``wpalt`` (>=0), at their cumulative along-route
-        distance from the current position. Returns ``(cumdist_m, alt_m)`` (both
-        ascending-distance arrays) or ``None`` when there is no usable vertical
-        intent ahead (aircraft then falls back to state-based only).
+        Returns a dict of ascending-distance arrays:
+          cum      [m]  position nodes (node 0 = current pos, then each waypoint)
+          lat, lon [deg] at those nodes
+          cum_alt  [m]  altitude nodes (node 0 = current alt, then waypoints with a
+                        SPECIFIED wpalt) — the planned climb gradient is the linear
+                        interpolation between them
+          alt      [m]  at cum_alt
+          target   [m]  the climb optimum = max planned altitude ahead
+        or ``None`` when the route gives no usable plan (falls back to state-based).
         """
         ap = getattr(ownship, 'ap', None)
         if ap is None or not hasattr(ap, 'route'):
@@ -180,7 +171,6 @@ class IntentBasedNAT(StateBasedNAT):
             return None
         if rte is None or getattr(rte, 'nwp', 0) == 0:
             return None
-
         iact = getattr(rte, 'iactwp', 0)
         if iact is None or iact < 0:
             iact = 0
@@ -191,43 +181,49 @@ class IntentBasedNAT(StateBasedNAT):
             return None
 
         cum = [0.0]
-        alts = [float(ownship.alt[idx])]
+        lat = [float(ownship.lat[idx])]
+        lon = [float(ownship.lon[idx])]
+        cum_alt = [0.0]
+        alt = [float(ownship.alt[idx])]
         acc = 0.0
-        prev_lat, prev_lon = float(ownship.lat[idx]), float(ownship.lon[idx])
         for k in range(len(wlat)):
-            acc += float(geo.kwikdist(prev_lat, prev_lon,
+            acc += float(geo.kwikdist(lat[-1], lon[-1],
                                       float(wlat[k]), float(wlon[k]))) * nm
-            prev_lat, prev_lon = float(wlat[k]), float(wlon[k])
+            cum.append(acc); lat.append(float(wlat[k])); lon.append(float(wlon[k]))
             wa = float(walt[k])
-            if wa >= 0.0:                 # only specified altitudes are intent nodes
-                cum.append(acc)
-                alts.append(wa)
+            if wa >= 0.0:
+                cum_alt.append(acc); alt.append(wa)
         if len(cum) < 2:
-            return None                   # flat → no convergence to predict
-        return np.asarray(cum), np.asarray(alts)
-
-    def _intent_vertical(self, si, sj, gs_i, gs_j, hpz_ij, tinhor, touthor, dtl):
-        """Sample the planned vertical gap over [0, dtl] and combine with the
-        (reused) horizontal window. Returns ``(tinconf, min_dalt)`` for the first
-        joint breach, or ``None`` if none within the lookahead.
-        """
-        if dtl <= 0.0:
             return None
-        cum_i, alt_i = si
-        cum_j, alt_j = sj
-        ts = np.arange(0.0, dtl + 1e-6, self.INTENT_DT)
+        alt = np.asarray(alt)
+        return {'cum': np.asarray(cum), 'lat': np.asarray(lat), 'lon': np.asarray(lon),
+                'cum_alt': np.asarray(cum_alt), 'alt': alt, 'target': float(alt.max())}
+
+    def _project_pair(self, si, sj, gs_i, gs_j, rpz_ij, hpz_ij):
+        """Project both aircraft along their plans over [0, T_FRAME_S] and test
+        same-time RPZ/HPZ. Returns ``(tinconf, min_dalt, dcpa)`` for the first
+        joint breach, or ``None``.
+        """
+        ts = np.arange(0.0, self.T_FRAME_S + 1e-6, self.INTENT_DT)
         if ts.size == 0:
             return None
-        ai = np.interp(max(gs_i, 0.0) * ts, cum_i, alt_i)   # np.interp clamps at ends
-        aj = np.interp(max(gs_j, 0.0) * ts, cum_j, alt_j)
-        dalt_t = np.abs(ai - aj)
-
-        vert_breach = dalt_t < hpz_ij
-        horiz_in = (ts >= tinhor) & (ts <= touthor)
-        both = vert_breach & horiz_in
-        if not np.any(both):
+        di = max(gs_i, 0.0) * ts
+        dj = max(gs_j, 0.0) * ts
+        lat_i = np.interp(di, si['cum'], si['lat']); lon_i = np.interp(di, si['cum'], si['lon'])
+        lat_j = np.interp(dj, sj['cum'], sj['lat']); lon_j = np.interp(dj, sj['cum'], sj['lon'])
+        alt_i = np.interp(di, si['cum_alt'], si['alt'])
+        alt_j = np.interp(dj, sj['cum_alt'], sj['alt'])
+        # flat-earth (kwik) horizontal distance at each t [m]
+        latm = np.radians(0.5 * (lat_i + lat_j))
+        dx = _RE * np.radians(lon_j - lon_i) * np.cos(latm)
+        dy = _RE * np.radians(lat_j - lat_i)
+        hdist = np.hypot(dx, dy)
+        vdist = np.abs(alt_i - alt_j)
+        breach = (hdist < rpz_ij) & (vdist < hpz_ij)
+        if not np.any(breach):
             return None
-        tinconf = float(ts[int(np.argmax(both))])          # first joint-breach time
-        window = horiz_in if np.any(horiz_in) else np.ones_like(ts, dtype=bool)
-        min_dalt = float(np.min(dalt_t[window]))
-        return tinconf, min_dalt
+        k = int(np.argmax(breach))                   # first joint breach
+        tinconf = float(ts[k])
+        min_dalt = float(np.min(vdist[breach]))
+        dcpa = float(np.min(hdist[breach]))
+        return tinconf, min_dalt, dcpa

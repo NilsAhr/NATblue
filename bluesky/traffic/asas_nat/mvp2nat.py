@@ -53,6 +53,8 @@ _CT_VSREL_MAX   = 500.0 * fpm      # max |vs1-vs2| to count as co-track (not a f
 _HOLD_HPZ_MARGIN   = 1.10           # hold the trailing aircraft this x HPZ below the leader
 _HOLD_VS_MAX       = 1500.0 * fpm   # cap the VS used to reach the hold target [m/s]
 _HOLD_RELEASE_FACT = 1.10           # release when horizontal dist > this x RPZ
+_HOLD_HYST_TICKS   = 5              # release only after the clear condition holds this
+                                    # many consecutive ticks (anti-bounce hysteresis)
 
 
 class MVP2NAT(ConflictResolution):
@@ -202,11 +204,11 @@ class MVP2NAT(ConflictResolution):
                     idx = bs.traf.id2idx(cs)
                     if idx >= 0:
                         arr[idx] = True
-            if self.swaltholdcotrack:
-                for cs in self._hold:            # trailing aircraft is slowed
-                    idx = bs.traf.id2idx(cs)
-                    if idx >= 0:
-                        arr[idx] = True
+            # FL-hold redesign step 1 (2026-08-04): the co-track hold no longer
+            # slows the held aircraft — the altitude level-off alone maintains
+            # vertical separation, and the speed reduction was the mechanism that
+            # got the held aircraft overtaken from behind (in-trail-D induced LoS).
+            # Speed channel therefore stays with the AP for held aircraft.
             return arr
         return self.active
 
@@ -498,19 +500,19 @@ class MVP2NAT(ConflictResolution):
                 if idx >= 0:
                     newtrack[idx] = trk
 
-        # Co-track FL-hold override (iter 3): held (trailing) aircraft fly a FIXED
-        # target altitude (bounded VS toward it, so no runaway) and a reduced TAS,
-        # held until horizontally clear. altactive/tasactive are forced True for them.
+        # Co-track FL-hold override: held aircraft fly a FIXED target altitude
+        # (bounded VS toward it, so no runaway), held until clear. altactive is
+        # forced True for them. Step-1 redesign (2026-08-04): NO speed reduction
+        # any more — the altitude level-off alone keeps vertical separation, so the
+        # TAS channel is left with the AP (removes the in-trail-D overtake induced).
         if self.swaltholdcotrack and self._hold:
             alt = np.array(alt, dtype=float, copy=True)
-            allowed_tas = np.array(allowed_tas, dtype=float, copy=True)
             vscapped = np.array(vscapped, dtype=float, copy=True)
             for cs, h in self._hold.items():
                 idx = bs.traf.id2idx(cs)
                 if idx < 0:
                     continue
                 alt[idx] = h['alt']
-                allowed_tas[idx] = h['tas']
                 # bounded VS toward the fixed target (reach over ~60 s, capped)
                 vscapped[idx] = np.clip((h['alt'] - ownship.alt[idx]) / 60.0,
                                         -_HOLD_VS_MAX, _HOLD_VS_MAX)
@@ -779,24 +781,52 @@ class MVP2NAT(ConflictResolution):
         rel_trk = abs(((ownship.trk[idx1] - intruder.trk[idx2] + 180.0) % 360.0) - 180.0)
         if rel_trk >= _CT_ANGLE_DEG:
             return
-        # along-track ordering: is the intruder ahead of the ownship?
-        re = 6371000.0
-        dx = re * np.radians(intruder.lon[idx2] - ownship.lon[idx1]) * \
-            np.cos(0.5 * np.radians(intruder.lat[idx2] + ownship.lat[idx1]))
-        dy = re * np.radians(intruder.lat[idx2] - ownship.lat[idx1])
-        ahead = (dx * ownship.gseast[idx1] + dy * ownship.gsnorth[idx1]) > 0.0
-        # trailing aircraft = the one with the other ahead of it (ownship and
-        # intruder are the same ADSB traffic array, so index either via ownship).
-        if ahead:                                   # intruder ahead -> ownship trails
-            trail, trail_i, lead_i = ac1, idx1, idx2
+        # Redesign step 2D (2026-08-05): hold the LOWER aircraft at
+        # min(current, higher_target_FL - 1.1*HPZ), FROZEN at engagement.
+        # Rationale (data-driven): co-track pairs converge because their optimum FLs
+        # are within HPZ, so the higher levels off only ~300-800 ft above the lower's
+        # own optimum — holding the lower at its CURRENT FL does NOT create ≥HPZ
+        # separation (step-2 gave 31 unresolved). Referencing the hold level to the
+        # HIGHER's target FL (highest planned wpalt = its cruise optimum) descends the
+        # lower only as much as needed to sit 1.1*HPZ below where the higher will end
+        # up. FROZEN (no ratchet chase) so the runaway dive cannot recur; as the higher
+        # climbs to its target the gap only holds/grows. No speed reduction (step 1).
+        if ownship.alt[idx1] <= ownship.alt[idx2]:
+            low, low_i, high = ac1, idx1, ac2
         else:
-            trail, trail_i, lead_i = ac2, idx2, idx1
+            low, low_i, high = ac2, idx2, ac1
         hpz_m = np.max(conf.hpz[[idx1, idx2]])
-        target_alt = min(ownship.alt[trail_i],
-                         ownship.alt[lead_i] - _HOLD_HPZ_MARGIN * hpz_m)
-        self._hold[trail] = {'partner': ac2 if trail == ac1 else ac1,
-                             'alt': float(target_alt),
-                             'tas': float(_CT_SPD_FACTOR * ownship.tas[trail_i])}
+        high_i = idx2 if low == ac1 else idx1
+        higher_target = self._target_fl(high_i)
+        # Hold level = min(current, higher_target - 1.1*HPZ), FROZEN.
+        # (2026-08-05 data: a "climb UP to the highest safe FL" variant induced 265
+        # LoS on the subset because held aircraft climbed through intermediate traffic
+        # — climbing up is the one action that moves INTO traffic.) So NEVER climb:
+        # with early EPP detection the lower is already below the safe ceiling → it
+        # simply STOPS climbing at its current FL (no vertical movement, minimal
+        # induced) while the higher climbs away; if detected late it descends to the
+        # ceiling (safety net). No ratchet chase (no runaway), no speed reduction.
+        hold_alt = min(float(ownship.alt[low_i]),
+                       higher_target - _HOLD_HPZ_MARGIN * hpz_m)
+        self._hold[low] = {'partner': high, 'alt': float(hold_alt), 'clear': 0}
+
+    @staticmethod
+    def _target_fl(idx):
+        ''' Target cruise FL [m] of aircraft idx = the highest *planned* altitude on
+            its remaining route (max specified wpalt from the active waypoint on).
+            This is its climb optimum; the co-track hold references the LOWER
+            aircraft's level to the HIGHER's target so ≥HPZ separation holds for the
+            whole climb. Falls back to current altitude if the route has no usable
+            wpalt ahead (never returns below current). '''
+        cur = float(bs.traf.alt[idx])
+        try:
+            rte = bs.traf.ap.route[idx]
+            iact = getattr(rte, 'iactwp', 0)
+            iact = 0 if (iact is None or iact < 0) else iact
+            alts = [float(a) for a in rte.wpalt[iact:] if a is not None and a >= 0.0]
+        except (IndexError, AttributeError, TypeError):
+            alts = []
+        return max([cur] + alts)
 
     def _maintain_hold(self, ownship, conf):
         ''' Refresh each persistent hold and release it once the pair is
@@ -822,13 +852,18 @@ class MVP2NAT(ConflictResolution):
             dvx = bs.traf.gseast[j] - bs.traf.gseast[i]
             dvy = bs.traf.gsnorth[j] - bs.traf.gsnorth[i]
             separating = (dx * dvx + dy * dvy) > 0.0
+            # Policy-4 release (2026-08-05): resume climb once HORIZONTALLY clear,
+            # with anti-bounce hysteresis (the clear condition must hold for
+            # _HOLD_HYST_TICKS consecutive ticks). Same-track locks never clear →
+            # the lower stays level at the safe FL (accepts the below-optimum penalty).
             if separating and hdist > _HOLD_RELEASE_FACT * rpz_m:
-                del self._hold[cs]
-                continue
-            # refresh the target below the (possibly climbed) leader
-            hpz_m = np.max(conf.hpz[[i, j]])
-            self._hold[cs]['alt'] = float(min(self._hold[cs]['alt'],
-                                              bs.traf.alt[j] - _HOLD_HPZ_MARGIN * hpz_m))
+                self._hold[cs]['clear'] = self._hold[cs].get('clear', 0) + 1
+                if self._hold[cs]['clear'] >= _HOLD_HYST_TICKS:
+                    del self._hold[cs]
+                    continue
+            else:
+                self._hold[cs]['clear'] = 0
+            # Hold target = the FROZEN highest-safe-FL set at engagement (no chase).
 
 
 # ─────────────────────────────────────────────────────────────────────────────
