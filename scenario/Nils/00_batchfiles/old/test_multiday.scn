@@ -1,0 +1,14 @@
+00:00:00.00>swrad wpt
+00:00:00.00>swrad apt
+
+# multi day wind 
+00:00:00.00>DATE 11,3,2019 00:00:00
+00:00:00.00>PLUGIN LOAD WINDECMWFUP
+00:00:00.00>impl windsim windecmwfup
+00:00:00.00>PCALL Nils\test_clocktime_d1.scn
+23:00:00.00>windecmwfup 10 50 90 -130 2019 3 11 23
+23:00:00.00>FF
+23:59:59.00>PRINT Second day starts
+23:59:59.00>PCALL Nils\test_clocktime_d2.scn
+
+

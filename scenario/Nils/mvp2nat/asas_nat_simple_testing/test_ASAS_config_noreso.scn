@@ -1,0 +1,11 @@
+# ======================================================================
+# ASAS_NAT common config — DETECTION ONLY (no resolution)
+# Used for Phase 0 baseline testing
+# ======================================================================
+00:00:00.00>plugin load loggerff_asas
+00:00:00.00>CDMETHOD STATEBASED
+00:00:00.00>RESO OFF
+00:00:00.00>ZONER 14
+00:00:00.00>ZONEDH 1000
+00:00:00.00>DTLOOK 300
+00:00:00.00>STARTLOG

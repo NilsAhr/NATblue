@@ -1,0 +1,14 @@
+# ======================================================================
+# ASAS_NAT config — VERTICAL resolution only
+# Used for Phase 1 testing
+# ======================================================================
+00:00:00.00>plugin load loggerff_asas
+00:00:00.00>CDMETHOD STATEBASED
+00:00:00.00>RESO MVP
+00:00:00.00>ZONER 5
+00:00:00.00>ZONEDH 1000
+00:00:00.00>DTLOOK 300
+00:00:00.00>RFACH 1.05
+00:00:00.00>RFACV 1.05
+00:00:00.00>RMETHV ON
+00:00:00.00>STARTLOG

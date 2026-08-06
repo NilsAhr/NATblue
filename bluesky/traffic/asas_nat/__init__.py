@@ -24,5 +24,5 @@ statebased_nat
 """
 from .mvp_nat import MVPNAT
 from .mvp2nat import MVP2NAT
-from .statebased_nat import StateBasedNAT
+from .statebased_nat import StateBasedNAT, StateBasedRealVS
 from .intentbased import IntentBasedNAT

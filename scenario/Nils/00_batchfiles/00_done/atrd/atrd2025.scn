@@ -1,0 +1,21 @@
+00:00:00.00>SCEN condition_8h
+00:00:00.00>PLUGIN LOAD LOGGER
+00:00:00.00>PLUGIN LOAD WINDECMWFUP
+00:00:00.00>PCALL Nils/artd2025/update8h.scn
+00:00:00.00>impl windsim windecmwfup
+00:00:00.00>windecmwfup 0 30 80 -130 2019 03 15 0
+00:00:00.00>startlog
+00:00:00.00>FF
+23:59:50.00>ECHO simulation 8 finished
+23:59:59.00>HOLD
+
+00:00:00.00>SCEN condition_12h
+00:00:00.00>PLUGIN LOAD LOGGER
+00:00:00.00>PLUGIN LOAD WINDECMWFUP12
+00:00:00.00>PCALL Nils/artd2025/update12h.scn
+00:00:00.00>impl windsim windecmwfup12
+00:00:00.00>windecmwfup12 0 30 80 -130 2019 03 15 0
+00:00:00.00>startlog
+00:00:00.00>FF
+23:59:50.00>ECHO simulation 12 finished
+23:59:59.00>HOLD

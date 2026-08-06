@@ -21,6 +21,7 @@ itself is bit-for-bit equivalent to the pre-refactor version.
 @date   : 2026-04 (refactor 2026-07)
 """
 import numpy as np
+import bluesky as bs
 from bluesky import stack
 from bluesky.tools import geo
 from bluesky.tools.aero import nm
@@ -104,10 +105,13 @@ class StateBasedNAT(ConflictDetectionNAT):
     # ------------------------------------------------------------------ #
     # Vertical crossing + combine + conflict lists
     # ------------------------------------------------------------------ #
-    def _combine_vertical(self, ownship, intruder, hpz, dtlookahead, H):
+    def _combine_vertical(self, ownship, intruder, hpz, dtlookahead, H, vs_vec=None):
         """State-based vertical window + combine with horizontal window ``H``.
 
-        Identical maths to the original monolithic ``detect()``.
+        Identical maths to the original monolithic ``detect()``. ``vs_vec`` is an
+        optional per-aircraft vertical-rate override (used by ``StateBasedRealVS``
+        to substitute a real climb rate for the artifact-zero ``ownship.vs``);
+        when ``None`` the behaviour is bit-for-bit the original.
         """
         I = H['I']
         tinhor, touthor = H['tinhor'], H['touthor']
@@ -119,8 +123,10 @@ class StateBasedNAT(ConflictDetectionNAT):
         dalt = (ownship.alt.reshape((1, ownship.ntraf))
                 - intruder.alt.reshape((1, ownship.ntraf)).T + 1e9 * I)
 
-        dvs = (ownship.vs.reshape(1, ownship.ntraf)
-               - intruder.vs.reshape(1, ownship.ntraf).T)
+        vs_own = ownship.vs if vs_vec is None else vs_vec
+        vs_int = intruder.vs if vs_vec is None else vs_vec
+        dvs = (np.asarray(vs_own).reshape(1, ownship.ntraf)
+               - np.asarray(vs_int).reshape(1, ownship.ntraf).T)
 
         hpz = np.asarray(np.maximum(np.asmatrix(hpz), np.asmatrix(hpz).transpose()))
 
@@ -166,3 +172,76 @@ class StateBasedNAT(ConflictDetectionNAT):
         return (confpairs, lospairs, inconf, tcpamax,
                 qdr[swconfl], dist[swconfl], np.sqrt(dcpa2[swconfl]),
                 tcpa[swconfl], tinconf[swconfl], min_dalt[swconfl])
+
+
+class StateBasedRealVS(StateBasedNAT):
+    """State-based CD using a REAL vertical rate instead of the artifact-zero
+    ``bs.traf.vs`` (CDMETHOD ``STATEBASEDREALVS``).
+
+    BlueSky's ``swaltsel`` shortcut (traffic.py) leaves the vertical-speed STATE at
+    ~0 for shallow VNAV cruise-climbs — the altitude is snapped to the commanded
+    value instead of being integrated from ``vs`` — so velocity-based vertical CD
+    never foresees co-track cruise-climb convergence (it projects both aircraft as
+    level). This variant feeds the vertical block a real climb rate:
+
+      * ``USE_COMMANDED=False`` (default): realized ``d(alt)/dt`` over ~``VS_SMOOTH_S``
+        seconds — what a real ADS-B vertical-rate message reports; accurate and
+        noise-robust.
+      * ``USE_COMMANDED=True``: the commanded ``aporasas.vs`` (no history, but can
+        overshoot the achieved climb near the performance ceiling).
+
+    Everything else is identical to ``StateBasedNAT`` (bit-identical when the real
+    vs equals the state vs).
+    """
+
+    VS_SMOOTH_S   = 20.0     # [s] window for realized d(alt)/dt
+    USE_COMMANDED = False    # True -> use commanded aporasas.vs instead
+
+    def __init__(self):
+        super().__init__()
+        self._alt_ref = {}   # acid -> (t_ref [s], alt_ref [m]) for windowed d(alt)/dt
+        self._vs_last = {}   # acid -> last computed real vs [m/s]
+
+    def reset(self):
+        super().reset()
+        self._alt_ref = {}
+        self._vs_last = {}
+
+    def detect(self, ownship, intruder, rpz, hpz, dtlookahead):
+        vs_real = self._real_vs(ownship)
+        H = self._horizontal(ownship, intruder, rpz, dtlookahead)
+        return self._combine_vertical(ownship, intruder, hpz, dtlookahead, H,
+                                      vs_vec=vs_real)
+
+    def _real_vs(self, ownship):
+        """Per-aircraft real vertical rate [m/s], aligned to ``ownship``."""
+        n = ownship.ntraf
+        if self.USE_COMMANDED:
+            apo = getattr(ownship, 'aporasas', None)
+            vs = getattr(apo, 'vs', None) if apo is not None else None
+            if vs is None:
+                vs = getattr(getattr(ownship, 'ap', None), 'vs', ownship.vs)
+            return np.asarray(vs, dtype=float)
+        # realized d(alt)/dt over a ~VS_SMOOTH_S window, keyed by aircraft id so it
+        # is robust to index shifts on create/delete.
+        t = float(bs.sim.simt)
+        alt = np.asarray(ownship.alt, dtype=float)
+        ids = ownship.id
+        out = np.zeros(n, dtype=float)
+        for k in range(n):
+            acid = ids[k]
+            ref = self._alt_ref.get(acid)
+            if ref is None:
+                self._alt_ref[acid] = (t, alt[k])
+                out[k] = self._vs_last.get(acid, 0.0)
+                continue
+            t0, a0 = ref
+            dt = t - t0
+            if dt >= self.VS_SMOOTH_S:
+                v = (alt[k] - a0) / dt                # [m/s]
+                self._vs_last[acid] = v
+                self._alt_ref[acid] = (t, alt[k])
+                out[k] = v
+            else:
+                out[k] = self._vs_last.get(acid, 0.0)
+        return out

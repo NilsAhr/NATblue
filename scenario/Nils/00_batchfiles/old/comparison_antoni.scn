@@ -1,0 +1,9 @@
+00:00:00.00>SCEN comparison_antoni
+00:00:00.00>PLUGIN LOAD LOGGER
+00:00:00.00>PLUGIN LOAD WINDECMWFUP
+00:00:00.00>PCALL Nils/bnd/antoni/comparison_baw15k.scn
+00:00:00.00>impl windsim windecmwfup
+00:00:00.00>windecmwfup 10 50 90 -130 2019 3 12 0
+00:00:00.00>startlog
+00:00:00.00>FF
+

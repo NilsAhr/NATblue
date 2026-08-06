@@ -1,0 +1,35 @@
+{
+  "generator": "make_batchfiles_paper3.py",
+  "generated_at": "2026-07-16T12:13:45",
+  "batch_file": "C:\\Users\\ahre_ni\\NATBlue\\scenario\\Nils\\00_batchfiles\\mvp2nat\\paper3_mvp2nat_vert_g1.scn",
+  "tag": "mvp2nat_vert",
+  "reso": "MVP2NAT_VERT",
+  "extra_commands": [],
+  "dtlook_s": 500,
+  "zoner_nm": 5,
+  "zonedh_ft": 1000,
+  "wind": "on (WINDECMWFUP 1.0deg, per-day ref-date+hour from paper-2 exp1)",
+  "days": [
+    "20251215",
+    "20250708",
+    "20250408",
+    "20250424"
+  ],
+  "scen_names": [
+    "paper3_mvp2nat_vert_20251215",
+    "paper3_mvp2nat_vert_20250708",
+    "paper3_mvp2nat_vert_20250408",
+    "paper3_mvp2nat_vert_20250424"
+  ],
+  "conf_scenarios": [
+    "Nils/mvp2nat/paper3/conf_20251215.scn",
+    "Nils/mvp2nat/paper3/conf_20250708.scn",
+    "Nils/mvp2nat/paper3/conf_20250408.scn",
+    "Nils/mvp2nat/paper3/conf_20250424.scn"
+  ],
+  "mvp2nat_git": {
+    "sha": "c696cb9de073d19f9d75123ba47ce5fab8d4df9c",
+    "branch": "loggerff",
+    "asas_nat_dirty": false
+  }
+}

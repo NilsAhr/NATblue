@@ -1,0 +1,32 @@
+# call all phase 0 scenario from batch
+
+00:00:00.00>SCEN G1
+00:00:00.00>pcall Nils\asas_nat\test_G1_same_dir_same_FL.scn
+#00:00:00.00>
+
+00:00:00.00>SCEN G2
+00:00:00.00>pcall Nils\asas_nat\test_G2_same_dir_climbing.scn
+
+00:00:00.00>SCEN G3
+00:00:00.00>pcall Nils\asas_nat\test_G3_parallel_same_FL.scn
+
+00:00:00.00>SCEN G4
+00:00:00.00>pcall Nils\asas_nat\test_G4_parallel_climbing.scn
+
+00:00:00.00>SCEN G5
+00:00:00.00>pcall Nils\asas_nat\test_G5_head_on_same_FL.scn
+
+00:00:00.00>SCEN G6
+00:00:00.00>pcall Nils\asas_nat\test_G6_head_on_offset.scn
+
+00:00:00.00>SCEN G7
+00:00:00.00>pcall Nils\asas_nat\test_G7_crossing_shallow.scn
+
+00:00:00.00>SCEN G8
+00:00:00.00>pcall Nils\asas_nat\test_G8_crossing_MMO.scn
+
+00:00:00.00>SCEN G9
+00:00:00.00>pcall Nils\asas_nat\test_G9_near_ceiling.scn
+
+00:00:00.00>SCEN G10
+00:00:00.00>pcall Nils\asas_nat\test_G10_multi_aircraft.scn

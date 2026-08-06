@@ -1,0 +1,19 @@
+# baseline20 2025 07 18 - sep:19NM
+00:00:00.00>SCEN baseline20nowind_20250718_14NM
+00:00:00.00>DATE 17,7,2025 00:00:00
+00:00:04.00>PERF BADA
+00:00:06.00>PLUGIN LOAD LOGGERCOMPACT
+# day-1
+00:00:12.00>PCALL Nils/bnd/topnat/baseline20_cas.scn
+00:00:30.00>startlog
+00:00:32.00>FF
+
+# optimised no wind 2025 07 18 - sep:19NM
+00:00:00.00>SCEN optimised20nowind_20250718_14NM
+00:00:00.00>DATE 17,7,2025 00:00:00
+00:00:04.00>PERF BADA
+00:00:06.00>PLUGIN LOAD LOGGERCOMPACT
+# day-1
+00:00:12.00>PCALL Nils/bnd/topnat/optimised20.scn
+00:00:30.00>startlog
+00:00:32.00>FF

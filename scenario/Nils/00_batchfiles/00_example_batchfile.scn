@@ -1,0 +1,48 @@
+# turn off wps
+00:00:00.00>swrad wpt
+00:00:00.00>swrad apt
+
+# define scenario name: can be used in logger
+00:00:00.00>SCEN name
+
+# define simultion date - best to start from utc 00 so runtime is clocktime
+00:00:00.00>DATE DD,MM,YYYY HH:MM:SS
+
+# return for terminal
+00:00:00.00>PRINT START name
+
+# set conflict detection on and parameters
+00:00:00.00>ASAS ON
+00:00:00.00>ZONER 5
+00:00:00.00>ZONEDH 1000
+00:00:00.00>DTLOOK 300
+
+# load plugins
+00:00:00.00>PLUGIN LOAD LOGGER
+00:00:00.00>PLUGIN LOAD WINDECMWFUP
+00:00:00.00>PLUGIN LOAD NATSEP
+
+# set NAT separation parameters
+00:00:01.00>NATSEP ON
+00:00:01.00>SETNATSEP 15,2000,420
+
+# load flight plan (scenario) via PCALL to keep setup
+00:00:02.00>PCALL scenario.scn
+
+# implement wind in simulation
+00:00:03.00>impl windsim windecmwfup
+
+# load wind data // can also be before first aircraft appear
+00:00:03.00>windecmwfup lat0(S) lon0(E) lat1(N) lon1(W) YYYY MM DD HH
+
+# start logger
+00:00:04.00>startlog
+
+# fast time
+00:00:04.00>FF
+
+#################
+# load second day
+23:59:59.00>PRINT Second Day
+23:59:59.00>PCALL scenario2.scn
+

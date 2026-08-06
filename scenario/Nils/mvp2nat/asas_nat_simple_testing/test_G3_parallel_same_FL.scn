@@ -1,0 +1,21 @@
+# ======================================================================
+# G3: Parallel tracks, same FL
+# Two aircraft on adjacent parallel tracks (~30 NM apart) at FL370.
+# Slight convergence angle so they drift into PZ.
+# Expect: shallow-angle conflict, bouncing/drift risk.
+# ======================================================================
+#00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_vert.scn
+#00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_noreso.scn
+00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_nat.scn
+#
+# AC001: B77W at lat 53.0, heading 088 (slightly converging north)
+# AC002: A333 at lat 53.08 (~5 NM north), heading 090
+# At these headings the aircraft converge slowly
+#
+00:00:00.00>CRE AC001 B77W 53.00 -30.0 088 FL370 480
+00:00:00.00>CRE AC002 A333 53.2 -30.0 095 FL370 478
+00:00:00.00>LNAV AC001 OFF
+00:00:00.00>LNAV AC002 OFF
+#
+00:00:00.00>FF
+01:00:00.00>HOLD

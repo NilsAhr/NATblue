@@ -1,0 +1,17 @@
+# cruise 2019 03 12 - sep:19NM
+00:00:00.00>SCEN cruise_20190312_19NM
+00:00:00.00>DATE 11,3,2019 00:00:00
+00:00:04.00>PERF BADA
+00:00:06.00>PLUGIN LOAD LOGGERFF
+00:00:08.00>PLUGIN LOAD WINDECMWFUP
+# day-1
+00:00:12.00>PCALL Nils/bnd/tests/cruise_11.scn
+00:00:14.00>impl windsim windecmwfup
+00:00:30.00>startlog
+00:00:32.00>FF
+23:00:00.00>windecmwfup -40 50 90 -150 2019 3 11 23
+23:01:00.00>op
+23:02:00.00>FF
+# nextday
+23:59:59.00>PCALL Nils/bnd/tests/cruise_12.scn
+24:01:00.00>FF

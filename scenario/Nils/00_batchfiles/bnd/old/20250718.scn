@@ -1,0 +1,53 @@
+# baseline 2025 07 18 - sep:19NM
+00:00:00.00>SCEN baseline_20250718_19NM
+00:00:00.00>DATE 17,7,2025 00:00:00
+00:00:04.00>PERF BADA
+00:00:06.00>PLUGIN LOAD LOGGERCOMPACT
+00:00:08.00>PLUGIN LOAD WINDECMWFUP
+# day-1
+00:00:12.00>PCALL Nils/bnd/topnat/baseline_vprofil_20250717.scn
+00:00:14.00>impl windsim windecmwfup
+00:00:30.00>startlog
+00:00:32.00>FF
+15:00:00.00>windecmwfup -40 50 90 -150 2025 7 17 15
+15:02:00.00>op
+15:03:00.00>FF
+# nextday
+23:59:59.00>PCALL Nils/bnd/topnat/baseline_vprofil_20250718.scn
+24:01:00.00>FF
+
+# optimised 2025 07 18 - sep:19NM
+00:00:00.00>SCEN optimised_20250718_19NM
+00:00:00.00>DATE 17,7,2025 00:00:00
+00:00:04.00>PERF BADA
+00:00:06.00>PLUGIN LOAD LOGGERCOMPACT
+00:00:08.00>PLUGIN LOAD WINDECMWFUP
+# day-1
+00:00:12.00>PCALL Nils/bnd/topnat/optimised_wosyn_20250717.scn
+00:00:14.00>impl windsim windecmwfup
+00:00:30.00>startlog
+00:00:32.00>FF
+15:00:00.00>windecmwfup -40 50 90 -150 2025 7 17 15
+15:02:00.00>op
+15:03:00.00>FF
+# nextday
+23:59:59.00>PCALL Nils/bnd/topnat/optimised_wosyn_20250718.scn
+24:01:00.00>FF
+
+# optimised 2025 07 18 - sep:19NM
+00:00:00.00>SCEN optimisedcruise_20250718_19NM
+00:00:00.00>DATE 17,7,2025 00:00:00
+00:00:04.00>PERF BADA
+00:00:06.00>PLUGIN LOAD LOGGERCOMPACT
+00:00:08.00>PLUGIN LOAD WINDECMWFUP
+# day-1
+00:00:12.00>PCALL Nils/bnd/topnat/optimised_cruisestart_20250717.scn
+00:00:14.00>impl windsim windecmwfup
+00:00:30.00>startlog
+00:00:32.00>FF
+15:00:00.00>windecmwfup -40 50 90 -150 2025 7 17 15
+15:02:00.00>op
+15:03:00.00>FF
+# nextday
+23:59:59.00>PCALL Nils/bnd/topnat/optimised_cruisestart_20250718.scn
+24:01:00.00>FF

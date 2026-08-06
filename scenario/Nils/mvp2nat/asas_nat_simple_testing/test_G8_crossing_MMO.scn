@@ -1,0 +1,21 @@
+# ======================================================================
+# G8: Crossing at MMO
+# Two aircraft crossing at ~60° angle, BOTH near Mach 0.86 (close to
+# typical MMO 0.87). Speed resolution margin nearly zero.
+# Expect: speed-based resolution will fail, must use hdg or vertical.
+# ======================================================================
+#00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_vert.scn
+#00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_noreso.scn
+00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_nat.scn
+#
+# AC001: B77W heading 090, FL370, 500 kt (M≈0.86)
+# AC002: B77W heading 030, FL370, 500 kt (M≈0.86)
+# Both near MMO — no speed margin
+#
+00:00:00.00>CRE AC001 B77W 53.00 -32.5 090 FL370 500
+00:00:00.00>CRE AC002 B77W 52.00 -31.5 030 FL370 500
+00:00:00.00>LNAV AC001 OFF
+00:00:00.00>LNAV AC002 OFF
+#
+00:00:00.00>FF
+00:40:00.00>HOLD

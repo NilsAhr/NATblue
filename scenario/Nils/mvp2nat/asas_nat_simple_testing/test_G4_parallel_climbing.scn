@@ -1,0 +1,21 @@
+# ======================================================================
+# G4: Parallel tracks, one climbing
+# Two aircraft on adjacent tracks; one climbs through the other's FL.
+# Expect: combined horizontal proximity + vertical conflict.
+# ======================================================================
+#00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_vert.scn
+#00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_noreso.scn
+00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_nat.scn
+#
+# AC001: B77W cruising FL370, heading 090
+# AC002: A333 at FL350, heading 090, ~5 NM south, climbing to FL390
+#
+00:00:00.00>CRE AC001 B77W 53.04 -30.0 090 FL370 480
+00:00:00.00>CRE AC002 A333 53.00 -30.0 090 FL350 478
+00:00:00.00>ALT AC002 FL390
+00:00:00.00>VS AC002 1000
+00:00:00.00>LNAV AC001 OFF
+00:00:00.00>LNAV AC002 OFF
+#
+00:00:00.00>FF
+00:40:00.00>HOLD

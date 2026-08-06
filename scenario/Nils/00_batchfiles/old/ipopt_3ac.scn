@@ -1,0 +1,29 @@
+# baseline vprofilemmo 2025 07 18 - sep:14NM
+00:00:00.00>SCEN baseline3ac_20250718_14NM
+00:00:00.00>DATE 17,7,2025 00:00:00
+00:00:04.00>PERF BADA
+00:00:06.00>PLUGIN LOAD LOGGERFF
+00:00:08.00>PLUGIN LOAD WINDECMWFUP
+# day-1
+00:00:12.00>PCALL Nils/bnd/topnat/baseline_3ac_20250718_aligned.scn
+00:00:16.00>impl windsim windecmwfup
+00:00:30.00>startlog
+00:00:32.00>FF
+15:00:00.00>windecmwfup -40 50 90 -150 2025 7 17 15 1 
+15:02:00.00>op
+15:03:00.00>FF
+
+# optimised linear 1deg 1h 2025 07 18 - sep:14NM
+00:00:00.00>SCEN optimisedlinear11ipopt_20250718_14NM
+00:00:00.00>DATE 17,7,2025 00:00:00
+00:00:04.00>PERF BADA
+00:00:06.00>PLUGIN LOAD LOGGERFF
+00:00:08.00>PLUGIN LOAD WINDECMWFUP
+# day-1
+00:00:12.00>PCALL Nils/bnd/topnat/optimised_3ac_ipopt_20250718.scn
+00:00:14.00>impl windsim windecmwfup
+00:00:30.00>startlog
+00:00:32.00>FF
+15:00:00.00>windecmwfup -40 50 90 -150 2025 7 17 15 1
+15:02:00.00>op
+15:03:00.00>FF

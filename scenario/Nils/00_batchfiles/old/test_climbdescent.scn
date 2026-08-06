@@ -1,0 +1,17 @@
+# optimised 2019 03 12 - sep:19NM
+00:00:00.00>SCEN allclimbdescent_20190312_19NM
+00:00:00.00>DATE 11,3,2019 00:00:00
+00:00:04.00>PERF BADA
+00:00:06.00>PLUGIN LOAD LOGGERFF
+00:00:08.00>PLUGIN LOAD WINDECMWFUP
+# day-1
+00:00:12.00>PCALL Nils/bnd/topnat/test_climb_descent_11.scn
+00:00:14.00>impl windsim windecmwfup
+00:00:30.00>startlog
+00:00:32.00>FF
+22:00:00.00>windecmwfup 10 50 90 -130 2019 3 11 22
+22:02:00.00>op
+22:05:00.00>FF
+# nextday
+23:59:59.00>PCALL Nils/bnd/topnat/test_climb_descent_12.scn
+24:01:00.00>FF

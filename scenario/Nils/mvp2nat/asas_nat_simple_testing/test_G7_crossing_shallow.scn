@@ -1,0 +1,20 @@
+# ======================================================================
+# G7: Crossing at shallow angle (30-60°)
+# Two aircraft crossing at ~45° angle at FL370.
+# Expect: very long conflict duration, challenging for MVP.
+# ======================================================================
+#00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_vert.scn
+#00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_noreso.scn
+00:00:00.00>CALL Nils\asas_nat\test_ASAS_config_nat.scn
+#
+# AC001: B77W heading 090 (east), FL370
+# AC002: A333 heading 045 (northeast), FL370
+# They converge from the south-west
+#
+00:00:00.00>CRE AC001 B77W 53.5 -31.2 090 FL370 480
+00:00:00.00>CRE AC002 A333 53.2 -31 045 FL370 480
+00:00:00.00>LNAV AC001 OFF
+00:00:00.00>LNAV AC002 OFF
+#
+00:00:00.00>FF
+01:00:00.00>HOLD

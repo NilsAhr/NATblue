@@ -1,0 +1,31 @@
+{
+  "generator": "make_batchfiles_paper3.py",
+  "generated_at": "2026-07-16T12:13:44",
+  "batch_file": "C:\\Users\\ahre_ni\\NATBlue\\scenario\\Nils\\00_batchfiles\\mvp2nat\\paper3_stockmvp_spd_g1.scn",
+  "tag": "stockmvp_spd",
+  "reso": "MVP",
+  "extra_commands": [
+    "RMETHH SPD"
+  ],
+  "dtlook_s": 500,
+  "zoner_nm": 5,
+  "zonedh_ft": 1000,
+  "wind": "on (WINDECMWFUP 1.0deg, per-day ref-date+hour from paper-2 exp1)",
+  "days": [
+    "20250714",
+    "20250122"
+  ],
+  "scen_names": [
+    "paper3_stockmvp_spd_20250714",
+    "paper3_stockmvp_spd_20250122"
+  ],
+  "conf_scenarios": [
+    "Nils/mvp2nat/paper3/conf_20250714.scn",
+    "Nils/mvp2nat/paper3/conf_20250122.scn"
+  ],
+  "mvp2nat_git": {
+    "sha": "c696cb9de073d19f9d75123ba47ce5fab8d4df9c",
+    "branch": "loggerff",
+    "asas_nat_dirty": false
+  }
+}
