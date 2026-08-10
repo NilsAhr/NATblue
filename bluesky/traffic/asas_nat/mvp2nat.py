@@ -106,6 +106,17 @@ class MVP2NAT(ConflictResolution):
         self.swaltholdcotrack = False
         self._hold = {}
 
+        # Co-track hold knobs (resolver sweep, 2026-08-06). Instance-level so the
+        # derived HYBRID3 variants can vary the hold WITHOUT touching the module
+        # constants. Defaults reproduce iter3b byte-for-byte:
+        #   _ct_spd_factor   1.0 => no speed reduction; 0.90 => slow to 90% TAS.
+        #   _hold_hpz_margin descend/ratchet target = leader_alt - margin*HPZ.
+        #   _hold_descend    True  => target = min(current, leader - margin*HPZ);
+        #                    False => freeze at current alt (no leader-relative descent).
+        self._ct_spd_factor  = _CT_SPD_FACTOR
+        self._hold_hpz_margin = _HOLD_HPZ_MARGIN
+        self._hold_descend    = True
+
     def reset(self):
         super().reset()
         self._fallback_state.clear()
@@ -899,11 +910,14 @@ class MVP2NAT(ConflictResolution):
         else:
             trail, trail_i, lead_i = ac2, idx2, idx1
         hpz_m = np.max(conf.hpz[[idx1, idx2]])
-        target_alt = min(ownship.alt[trail_i],
-                         ownship.alt[lead_i] - _HOLD_HPZ_MARGIN * hpz_m)
+        if self._hold_descend:
+            target_alt = min(ownship.alt[trail_i],
+                             ownship.alt[lead_i] - self._hold_hpz_margin * hpz_m)
+        else:
+            target_alt = ownship.alt[trail_i]        # freeze: hold current FL
         self._hold[trail] = {'partner': ac2 if trail == ac1 else ac1,
                              'alt': float(target_alt),
-                             'tas': float(_CT_SPD_FACTOR * ownship.tas[trail_i])}
+                             'tas': float(self._ct_spd_factor * ownship.tas[trail_i])}
 
     def _maintain_hold(self, ownship, conf):
         ''' Refresh each persistent hold and release it once the pair is
@@ -932,10 +946,12 @@ class MVP2NAT(ConflictResolution):
             if separating and hdist > _HOLD_RELEASE_FACT * rpz_m:
                 del self._hold[cs]
                 continue
-            # refresh the target below the (possibly climbed) leader
-            hpz_m = np.max(conf.hpz[[i, j]])
-            self._hold[cs]['alt'] = float(min(self._hold[cs]['alt'],
-                                              bs.traf.alt[j] - _HOLD_HPZ_MARGIN * hpz_m))
+            # refresh the target below the (possibly climbed) leader. Freeze mode
+            # keeps the detection-time altitude (no leader-relative ratchet).
+            if self._hold_descend:
+                hpz_m = np.max(conf.hpz[[i, j]])
+                self._hold[cs]['alt'] = float(min(self._hold[cs]['alt'],
+                                                  bs.traf.alt[j] - self._hold_hpz_margin * hpz_m))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1050,3 +1066,33 @@ class MVP2NAT_HYBRID3(MVP2NAT):
         self.swfallbackhdg  = True     # tactical: MVP-horizontal fallback (H2)
         self.swspeedcotrack = False    # co-track handled by FL-hold below, not the iter-2 speed
         self.swaltholdcotrack = True   # co-track: persistent FL-hold + speed on trailing ac
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HYBRID3 co-track-hold sweep variants (resolver comparison, 2026-08-06). All
+# share HYBRID3's tactical stack (H2 fallback + swaltholdcotrack); they differ
+# ONLY in the two co-track-hold knobs, forming a 2x2 {descend|freeze} x
+# {slow|no-slow}. HYBRID3 itself = descend + slow (iter3b). Select via
+# RESO MVP2NAT_HYBRID3_<VARIANT>.
+# ─────────────────────────────────────────────────────────────────────────────
+class MVP2NAT_HYBRID3_FLHOLD(MVP2NAT_HYBRID3):
+    ''' A: descend the trailing ac to min(current, leader-1.1*HPZ), NO speed cut. '''
+    def __init__(self):
+        super().__init__()
+        self._ct_spd_factor = 1.0      # descend only, no slow-down
+
+
+class MVP2NAT_HYBRID3_FREEZE(MVP2NAT_HYBRID3):
+    ''' C: freeze the trailing ac at its current FL (no leader-relative descent),
+        still slow it to 0.90x TAS. '''
+    def __init__(self):
+        super().__init__()
+        self._hold_descend = False     # freeze at current alt
+
+
+class MVP2NAT_HYBRID3_FREEZE_NOSPD(MVP2NAT_HYBRID3):
+    ''' D: freeze the trailing ac at its current FL, NO speed cut (pure stop-climb). '''
+    def __init__(self):
+        super().__init__()
+        self._hold_descend  = False    # freeze at current alt
+        self._ct_spd_factor = 1.0      # no slow-down
