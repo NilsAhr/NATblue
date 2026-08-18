@@ -13,6 +13,11 @@ from bluesky.tools.aero import ft, kts, nm, fpm, vtas2cas, vtas2mach
 from bluesky.tools.position import txt2pos
 import bluesky as bs
 
+# Window over which the realized vertical rate (vs_real column) is measured.
+# Matches StateBasedRealVS.VS_SMOOTH_S so the logged column equals the rate
+# CDMETHOD STATEBASEDREALVS feeds into its vertical conflict projection.
+VS_SMOOTH_S = 20.0
+
 # ======================================================================
 # FLIGHT-STATE HEADER  (loggerff columns + ASAS diagnostic columns)
 # ======================================================================
@@ -40,6 +45,7 @@ flstheader = (
     'cas,'
     'mach,'
     'vs,'
+    'vs_real,'              # [fpm] realized d(alt)/dt over VS_SMOOTH_S window
     'heading,'
     'track,'
     # --- ASAS diagnostic columns ---
@@ -200,6 +206,17 @@ class LoggerffAsas(Entity):
         self.init_tas1   = {}           # TAS at conflict start
         self.init_tas2   = {}
 
+        # --- Realized vertical rate (vs_real column) ---
+        # traf.vs is the integrator's instantaneous VS state, and it reads 0
+        # whenever traffic.py takes the swaltsel "snap" branch (alt is assigned
+        # from aporasas.alt instead of integrated from vs).  On shallow VNAV
+        # cruise climbs that is most ticks, so traf.vs is not the derivative of
+        # the logged altitude.  vs_real is that derivative, computed the same
+        # way as StateBasedRealVS._real_vs (asas_nat/statebased_nat.py) so the
+        # column is directly comparable to what CDMETHOD STATEBASEDREALVS uses.
+        self._vs_alt_ref = {}           # acid -> (t_ref [s], alt_ref [m])
+        self._vs_real    = {}           # acid -> last computed real vs [m/s]
+
         self.sim_name = stack.get_scenname()
 
         # Log files
@@ -327,6 +344,7 @@ class LoggerffAsas(Entity):
         self.init_mach1.clear(); self.init_mach2.clear()
         self.init_selalt1.clear(); self.init_selalt2.clear()
         self.init_tas1.clear(); self.init_tas2.clear()
+        self._vs_alt_ref.clear(); self._vs_real.clear()
         self.sim_name = None
 
     # ------------------------------------------------------------------
@@ -335,6 +353,36 @@ class LoggerffAsas(Entity):
         self.create_time[-n:]      = sim.simt
         self.total_fuel[-n:]       = 0.0
         self.last_update_time[-n:] = sim.simt
+
+    # ------------------------------------------------------------------
+    def _real_vs(self, n):
+        """Realized vertical rate [m/s] for the first *n* aircraft.
+
+        (alt(t) - alt(t-dt)) / dt over a ~VS_SMOOTH_S window, held between
+        updates.  Keyed by callsign so it survives index compaction when
+        traf.delete() removes an aircraft.  Mirrors
+        StateBasedRealVS._real_vs in asas_nat/statebased_nat.py.
+        """
+        t   = float(sim.simt)
+        alt = np.asarray(traf.alt[:n], dtype=float)
+        out = np.zeros(n, dtype=float)
+        for k in range(n):
+            acid = traf.id[k]
+            ref  = self._vs_alt_ref.get(acid)
+            if ref is None:
+                self._vs_alt_ref[acid] = (t, alt[k])
+                out[k] = self._vs_real.get(acid, 0.0)
+                continue
+            t0, a0 = ref
+            dt_ref = t - t0
+            if dt_ref >= VS_SMOOTH_S:
+                v = (alt[k] - a0) / dt_ref
+                self._vs_real[acid]    = v
+                self._vs_alt_ref[acid] = (t, alt[k])
+                out[k] = v
+            else:
+                out[k] = self._vs_real.get(acid, 0.0)
+        return out
 
     # ------------------------------------------------------------------
     @core.timed_function(name='LOGGERFF_ASAS', dt=1.0)
@@ -573,6 +621,7 @@ class LoggerffAsas(Entity):
             return
 
         # --- Pre-compute derived quantities ---
+        vs_real  = self._real_vs(n)
         trk_rad  = np.radians(traf.trk[:n])
         wn       = traf.windnorth[:n]
         we       = traf.windeast[:n]
@@ -619,6 +668,7 @@ class LoggerffAsas(Entity):
             traf.cas[:n] / kts,                             # cas [kts]
             traf.M[:n],                                     # mach [-]
             traf.vs[:n] / fpm,                              # vs [fpm]
+            vs_real / fpm,                                  # vs_real [fpm]
             traf.hdg[:n],                                   # heading [deg]
             traf.trk[:n],                                   # track [deg]
             # --- ASAS diagnostic columns ---
