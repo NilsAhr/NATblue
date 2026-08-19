@@ -5,3 +5,5 @@ from .statebased import StateBased
 from .mvp import MVP
 from .pastcpa import PastCPA
 from .pastcpanat import PastCPANAT
+from .ftr import FTR
+from .ftrnat import FTRNAT

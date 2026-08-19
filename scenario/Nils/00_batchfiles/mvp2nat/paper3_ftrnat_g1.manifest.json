@@ -1,0 +1,39 @@
+{
+  "generator": "hand-written (mirrors make_batchfiles_paper3.py output; add tag 'ftrnat' with extra_commands to the generator to regenerate)",
+  "generated_at": "2026-08-19T10:31:19",
+  "batch_file": "C:\\Users\\ahre_ni\\NATBlue\\scenario\\Nils\\00_batchfiles\\mvp2nat\\paper3_ftrnat_g1.scn",
+  "tag": "ftrnat",
+  "reso": "MVP2NAT_HYBRID3",
+  "cdmethod": "INTENTBASEDNAT",
+  "extra_commands": [
+    "RESNAV FTRNAT",
+    "FTRINTENT ASSUMED"
+  ],
+  "resnav": "FTRNAT",
+  "ab_baseline": "paper3_epp_s1_g1.scn",
+  "notes": "Identical to paper3_epp_s1_g1 except RESNAV FTRNAT + FTRINTENT ASSUMED, issued at 00:00:02.50 so they strictly follow RESO (which would otherwise reset resume-nav to PastCPANAT via select_default).",
+  "dtlook_s": 500,
+  "zoner_nm": 5,
+  "zonedh_ft": 1000,
+  "wind": "on (WINDECMWFUP 1.0deg, per-day ref-date+hour from paper-2 exp1)",
+  "days": [
+    "20240716",
+    "20250614",
+    "20240703"
+  ],
+  "scen_names": [
+    "paper3_ftrnat_20240716",
+    "paper3_ftrnat_20250614",
+    "paper3_ftrnat_20240703"
+  ],
+  "conf_scenarios": [
+    "Nils/mvp2nat/paper3/conf_20240716.scn",
+    "Nils/mvp2nat/paper3/conf_20250614.scn",
+    "Nils/mvp2nat/paper3/conf_20240703.scn"
+  ],
+  "mvp2nat_git": {
+    "sha": "d23625786519f5e8d88ec11309ff118552720e77",
+    "branch": "paper3-ftr",
+    "asas_nat_dirty": false
+  }
+}
