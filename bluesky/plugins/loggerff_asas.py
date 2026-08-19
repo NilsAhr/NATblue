@@ -106,6 +106,8 @@ confheader = (
     'heading_ac2[deg],'
     'vs_ac1[fpm],'
     'vs_ac2[fpm],'
+    'vs_real_ac1[fpm],'    # [fpm] windowed d(alt)/dt at conflict start
+    'vs_real_ac2[fpm],'
     'dcpa[nm],'
     'tcpa[sec],'
     'tLOS[sec],'
@@ -180,11 +182,13 @@ class LoggerffAsas(Entity):
         self.init_alt1 = {}
         self.init_hdg1 = {}
         self.init_vs1  = {}
+        self.init_vsreal1 = {}
         self.init_lat2 = {}
         self.init_lon2 = {}
         self.init_alt2 = {}
         self.init_hdg2 = {}
         self.init_vs2  = {}
+        self.init_vsreal2 = {}
         self.intrusion_occurred = {}
 
         # Severity & timing
@@ -295,6 +299,8 @@ class LoggerffAsas(Entity):
                 self.init_hdg2.get(cpf, np.nan),
                 self.init_vs1.get(cpf, np.nan),
                 self.init_vs2.get(cpf, np.nan),
+                self.init_vsreal1.get(cpf, np.nan),
+                self.init_vsreal2.get(cpf, np.nan),
                 self.dcpa.get(cpf, np.nan) / nm,
                 self.tcpa.get(cpf, np.nan),
                 self.tLOS.get(cpf, -1),
@@ -333,9 +339,9 @@ class LoggerffAsas(Entity):
         super().reset()
         self.duration.clear()
         self.init_lat1.clear(); self.init_lon1.clear(); self.init_alt1.clear()
-        self.init_hdg1.clear(); self.init_vs1.clear()
+        self.init_hdg1.clear(); self.init_vs1.clear(); self.init_vsreal1.clear()
         self.init_lat2.clear(); self.init_lon2.clear(); self.init_alt2.clear()
-        self.init_hdg2.clear(); self.init_vs2.clear()
+        self.init_hdg2.clear(); self.init_vs2.clear(); self.init_vsreal2.clear()
         self.intrusion_occurred.clear()
         self.dcpa.clear(); self.dalt.clear(); self.tLOS.clear()
         self.dist.clear(); self.qdr.clear(); self.tcpa.clear()
@@ -490,6 +496,10 @@ class LoggerffAsas(Entity):
         if hasattr(traf.perf, 'mass') and len(traf.perf.mass) >= n:
             current_mass = traf.perf.mass[:n]
 
+        # Realized vertical rate. Computed BEFORE conflict processing so a
+        # conflict starting on this tick records the current window value.
+        vs_real = self._real_vs(n)
+
         # ==============================================================
         # 4. CONFLICT PROCESSING  (with ASAS diagnostic extras)
         # ==============================================================
@@ -542,11 +552,13 @@ class LoggerffAsas(Entity):
                 self.init_alt1[up] = traf.alt[i1]
                 self.init_hdg1[up] = traf.hdg[i1]
                 self.init_vs1[up]  = traf.vs[i1] / fpm
+                self.init_vsreal1[up] = self._vs_real.get(traf.id[i1], 0.0) / fpm
                 self.init_lat2[up] = traf.lat[i2]
                 self.init_lon2[up] = traf.lon[i2]
                 self.init_alt2[up] = traf.alt[i2]
                 self.init_hdg2[up] = traf.hdg[i2]
                 self.init_vs2[up]  = traf.vs[i2] / fpm
+                self.init_vsreal2[up] = self._vs_real.get(traf.id[i2], 0.0) / fpm
 
                 # NEW: conflict geometry at start
                 dhdg = (traf.hdg[i1] - traf.hdg[i2] + 180) % 360 - 180
@@ -589,6 +601,8 @@ class LoggerffAsas(Entity):
                     self.init_hdg2.get(cpf, np.nan),
                     self.init_vs1.get(cpf, np.nan),
                     self.init_vs2.get(cpf, np.nan),
+                    self.init_vsreal1.get(cpf, np.nan),
+                    self.init_vsreal2.get(cpf, np.nan),
                     self.dcpa.get(cpf, np.nan) / nm,
                     self.tcpa.get(cpf, np.nan),
                     self.tLOS.get(cpf, -1),
@@ -621,7 +635,6 @@ class LoggerffAsas(Entity):
             return
 
         # --- Pre-compute derived quantities ---
-        vs_real  = self._real_vs(n)
         trk_rad  = np.radians(traf.trk[:n])
         wn       = traf.windnorth[:n]
         we       = traf.windeast[:n]
