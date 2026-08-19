@@ -54,6 +54,20 @@ _HOLD_HPZ_MARGIN   = 1.10           # hold the trailing aircraft this x HPZ belo
 _HOLD_VS_MAX       = 1500.0 * fpm   # cap the VS used to reach the hold target [m/s]
 _HOLD_RELEASE_FACT = 1.10           # release when horizontal dist > this x RPZ
 
+# ── Runaway-dive guard (paper-3 ticket 07, section 2) ────────────────────────
+# _MAX_DH_M caps the commanded altitude STEP relative to the aircraft's CURRENT
+# altitude, so it re-anchors every tick and a sustained descent ratchets through
+# it unbounded (~20 000 ft observed before VNAV rebounded into a LoS,
+# 05_todo_status.md 2026-07-28). Two extra bounds close that:
+#   * an absolute cap on the commanded vertical RATE, and
+#   * a CUMULATIVE altitude bound around a per-aircraft anchor taken when ASAS
+#     first seizes that aircraft's vertical channel (see _update_vs_anchors).
+# Both sit ABOVE the HYBRID3 co-track hold's own limits (1500 fpm, ~1100 ft) and
+# the guard is applied BEFORE the hold writes its target, so the accepted iter3b
+# behaviour is unchanged — pinned in bluesky/test/traffic/test_mvp2nat_guard.py.
+_MAX_RESO_VS    = 3000.0 * fpm   # [m/s] hard cap on ASAS-commanded |VS|
+_MAX_VNAV_DEV_M = 4000.0 * ft    # [m]   cumulative |commanded alt - anchor|
+
 
 class MVP2NAT(ConflictResolution):
     ''' Conflict resolution using the Modified Voltage Potential Method.
@@ -106,6 +120,23 @@ class MVP2NAT(ConflictResolution):
         self.swaltholdcotrack = False
         self._hold = {}
 
+        # Runaway-dive guard: {callsign: anchor altitude [m]} captured when ASAS
+        # first takes this aircraft's vertical channel and HELD until it is
+        # released. The commanded altitude is bounded to anchor +/-
+        # _MAX_VNAV_DEV_M, so a per-tick-bounded but sustained descent cannot
+        # ratchet away the way a bound relative to the CURRENT altitude does.
+        self._vs_anchor = {}
+
+        # Isolated-domain semantics (ticket 07, section 2b). When True the
+        # resolver commands ONLY the channels its domain owns; every other
+        # channel is returned to the autopilot. False here and in every hybrid
+        # subclass, so their behaviour is unchanged; the four domain subclasses
+        # set it True. Without it MVP2NAT_HDG also holds TAS and VS
+        # (newtas = ownship.tas, newvs = ownship.vs, with tasactive/vsactive
+        # inheriting self.active) and MVP2NAT_VERT also holds track — i.e. a
+        # "single-domain" run silently commands three channels.
+        self._isolate_domain = False
+
         # Co-track hold knobs (resolver sweep, 2026-08-06). Instance-level so the
         # derived HYBRID3 variants can vary the hold WITHOUT touching the module
         # constants. Defaults reproduce iter3b byte-for-byte:
@@ -122,6 +153,7 @@ class MVP2NAT(ConflictResolution):
         self._fallback_state.clear()
         self._speed_state.clear()
         self._hold.clear()
+        self._vs_anchor.clear()
 
     def setprio(self, flag=None, priocode=''):
         '''Set the prio switch and the type of prio '''
@@ -197,6 +229,31 @@ class MVP2NAT(ConflictResolution):
             # Do NOT swtich off self.swresohoriz if value == OFF
             self.swresovert = False
 
+    # ── Isolated-domain channel ownership (ticket 07, section 2b) ────────────
+    def _channel_owners(self):
+        ''' Which channels this resolver commands under isolated-domain
+            semantics: {'hdg','tas','vs','alt'} -> bool. Vertical owns vs+alt;
+            speed owns tas; heading owns hdg; everything else stays with the
+            autopilot. Only consulted when self._isolate_domain is True. '''
+        vert = bool(self.swresovert and not self.swresohoriz)
+        return {
+            "hdg": bool(self.swresohoriz and self.swresohdg),
+            "tas": bool(self.swresohoriz and self.swresospd),
+            "vs": vert,
+            "alt": vert,
+        }
+
+    def _isolated(self, channel):
+        ''' None when isolation is off — the sentinel that tells the channel
+            properties to fall through to legacy behaviour. Otherwise a
+            per-aircraft bool array: self.active for the channels this domain
+            owns, all-False for the rest. '''
+        if not self._isolate_domain:
+            return None
+        if self._channel_owners()[channel]:
+            return self.active
+        return np.zeros(bs.traf.ntraf, dtype=bool)
+
     @property
     def tasactive(self):
         ''' In vertical-only mode the autopilot retains Mach-hold control.
@@ -206,6 +263,9 @@ class MVP2NAT(ConflictResolution):
             violations. Returning False here keeps the speed channel with the AP,
             EXCEPT for aircraft the co-track speed reduction is actively slowing
             this tick (a REDUCTION, so MMO-safe). '''
+        iso = self._isolated("tas")
+        if iso is not None:
+            return iso
         if self.swresovert and not self.swresohoriz:
             arr = np.zeros(bs.traf.ntraf, dtype=bool)
             if self.swspeedcotrack:
@@ -227,6 +287,9 @@ class MVP2NAT(ConflictResolution):
             co-track FL-hold we ALSO force it True for held (trailing) aircraft
             even after the conflict clears vertically, so the AP cannot climb them
             back into the conflict (rebound) before they are horizontally clear. '''
+        iso = self._isolated("alt")
+        if iso is not None:
+            return iso
         base = self.active
         if not self.swaltholdcotrack or not self._hold:
             return base
@@ -238,12 +301,27 @@ class MVP2NAT(ConflictResolution):
         return arr
 
     @property
+    def vsactive(self):
+        ''' Under isolated-domain semantics the horizontal domains must NOT
+            command vertical speed. The base class has no override, so vsactive
+            inherits self.active and the horizontal branches of resolve()
+            (newvs = ownship.vs) hand the aircraft a VS HOLD at its current rate
+            instead of leaving the channel with the autopilot. '''
+        iso = self._isolated("vs")
+        if iso is not None:
+            return iso
+        return super().vsactive
+
+    @property
     def hdgactive(self):
         ''' When swfallbackhdg is OFF this returns the base behaviour
             (self.active). When ON, heading is ASAS-controlled ONLY while
             the 60 s fallback hold is in progress for that aircraft — outside
             the hold window the FMS owns the heading channel, so the aircraft
             navigates to its next waypoint as soon as the offset expires. '''
+        iso = self._isolated("hdg")
+        if iso is not None:
+            return iso
         if not self.swfallbackhdg:
             return super().hdgactive
         arr = np.zeros(bs.traf.ntraf, dtype=bool)
@@ -266,6 +344,46 @@ class MVP2NAT(ConflictResolution):
             if idx >= 0:
                 arr[idx] = True
         return arr
+
+    # ── Runaway-dive guard (ticket 07, section 2) ────────────────────────────
+    @staticmethod
+    def _clamp_vertical(vs_cmd, alt_cmd, anchor,
+                        max_vs=_MAX_RESO_VS, max_dev=_MAX_VNAV_DEV_M):
+        ''' Bound the ASAS vertical commands.
+
+            vs_cmd  [m/s]  commanded vertical speed, clipped to +/- max_vs.
+            alt_cmd [m]    commanded altitude, clipped to anchor +/- max_dev.
+            anchor  [m]    per-aircraft anchor from _update_vs_anchors; NaN =
+                           not under ASAS vertical control, in which case the
+                           altitude passes through unchanged (the VS cap still
+                           applies).
+            Returns (vs, alt) as NEW arrays; the inputs are not modified. '''
+        vs = np.clip(np.asarray(vs_cmd, dtype=float), -max_vs, max_vs)
+        alt = np.array(alt_cmd, dtype=float, copy=True)
+        a = np.asarray(anchor, dtype=float)
+        ok = np.isfinite(a)
+        if ok.any():
+            alt[ok] = np.clip(alt[ok], a[ok] - max_dev, a[ok] + max_dev)
+        return vs, alt
+
+    def _update_vs_anchors(self, engaged_ids, alt_by_id):
+        ''' Maintain {callsign: anchor altitude [m]} for the dive guard.
+
+            engaged_ids  callsigns whose vertical channel ASAS commands this tick
+            alt_by_id    {callsign: current altitude [m]}
+
+            The anchor is captured on FIRST engagement and held for as long as
+            the aircraft stays engaged — that is what makes the altitude bound
+            cumulative rather than per-tick. It is dropped as soon as the
+            aircraft is released, so a later, unrelated conflict re-anchors at
+            that time instead of inheriting a stale reference. '''
+        engaged = set(engaged_ids)
+        for cs in list(self._vs_anchor):
+            if cs not in engaged:
+                del self._vs_anchor[cs]
+        for cs in engaged:
+            if cs not in self._vs_anchor and cs in alt_by_id:
+                self._vs_anchor[cs] = float(alt_by_id[cs])
 
     def applyprio(self, dv_mvp, dv1, dv2, vs1, vs2):
         ''' Apply the desired priority setting to the resolution '''
@@ -508,6 +626,23 @@ class MVP2NAT(ConflictResolution):
                 idx = bs.traf.id2idx(cs)
                 if idx >= 0:
                     newtrack[idx] = trk
+
+        # Runaway-dive guard (ticket 07, section 2). Applied to the MVP-computed
+        # vertical commands ONLY: the co-track hold below writes its own,
+        # already-bounded target (stable FL, |VS| <= _HOLD_VS_MAX), so placing
+        # the guard here keeps HYBRID3/iter3b byte-identical. An aircraft counts
+        # as vertically engaged when MVP found a vertical solve time inside the
+        # lookahead — the same condition that gates asasalttemp above.
+        engaged = [ownship.id[i] for i in
+                   np.flatnonzero(timesolveV < conf.dtlookahead)]
+        self._update_vs_anchors(
+            engaged, {ownship.id[i]: ownship.alt[i] for i in range(ownship.ntraf)})
+        anchor = np.full(ownship.ntraf, np.nan)
+        for cs, a in self._vs_anchor.items():
+            idx = bs.traf.id2idx(cs)
+            if idx >= 0:
+                anchor[idx] = a
+        vscapped, alt = self._clamp_vertical(vscapped, alt, anchor)
 
         # Co-track FL-hold override (iter 3): held (trailing) aircraft fly a FIXED
         # target altitude (bounded VS toward it, so no runaway) and a reduced TAS,
@@ -968,6 +1103,7 @@ class MVP2NAT_VERT(MVP2NAT):
         self.swresospd   = False
         self.swresohdg   = False
         self.swresovert  = True
+        self._isolate_domain = True
 
 
 class MVP2NAT_SPD(MVP2NAT):
@@ -978,6 +1114,7 @@ class MVP2NAT_SPD(MVP2NAT):
         self.swresospd   = True
         self.swresohdg   = False
         self.swresovert  = False
+        self._isolate_domain = True
 
 
 class MVP2NAT_HDG(MVP2NAT):
@@ -988,6 +1125,7 @@ class MVP2NAT_HDG(MVP2NAT):
         self.swresospd   = False
         self.swresohdg   = True
         self.swresovert  = False
+        self._isolate_domain = True
 
 
 class MVP2NAT_BOTH(MVP2NAT):
@@ -998,6 +1136,42 @@ class MVP2NAT_BOTH(MVP2NAT):
         self.swresospd   = True
         self.swresohdg   = True
         self.swresovert  = False
+        self._isolate_domain = True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legacy (non-isolated) domain variants.
+# Pre-fix channel behaviour, kept ONLY so the isolation fix can be quantified at
+# a SINGLE git SHA (ticket 07, section 2b item 3): the horizontal domains here
+# also hold TAS and VS, and the vertical domain also holds track. Never use
+# these to make a domain claim — they exist for the before/after delta alone.
+# ─────────────────────────────────────────────────────────────────────────────
+class MVP2NAT_VERT_LEGACY(MVP2NAT_VERT):
+    ''' MVP2NAT_VERT with pre-fix (non-isolated) channel ownership. '''
+    def __init__(self):
+        super().__init__()
+        self._isolate_domain = False
+
+
+class MVP2NAT_SPD_LEGACY(MVP2NAT_SPD):
+    ''' MVP2NAT_SPD with pre-fix (non-isolated) channel ownership. '''
+    def __init__(self):
+        super().__init__()
+        self._isolate_domain = False
+
+
+class MVP2NAT_HDG_LEGACY(MVP2NAT_HDG):
+    ''' MVP2NAT_HDG with pre-fix (non-isolated) channel ownership. '''
+    def __init__(self):
+        super().__init__()
+        self._isolate_domain = False
+
+
+class MVP2NAT_BOTH_LEGACY(MVP2NAT_BOTH):
+    ''' MVP2NAT_BOTH with pre-fix (non-isolated) channel ownership. '''
+    def __init__(self):
+        super().__init__()
+        self._isolate_domain = False
 
 
 class MVP2NAT_HYBRID(MVP2NAT):
