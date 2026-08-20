@@ -391,6 +391,61 @@ class LoggerffAsas(Entity):
         return out
 
     # ------------------------------------------------------------------
+    # Per-EVENT conflict state
+    #
+    # A conflict EVENT is one contiguous span of confpairs membership for a
+    # pair. The same pair can produce several events in a run, so the state an
+    # event accumulates must be scoped to that event -- see
+    # _clear_conflict_state for what happens when it is not.
+    # ------------------------------------------------------------------
+    def _note_conflict_state(self, cpf, dist_now, simt, in_los):
+        """Accumulate one tick of the current event for pair `cpf`.
+
+        tinconf and tLOS are write-once (the FIRST tick, and the first tick in
+        LoS); dist is the event MINIMUM; intrusion_occurred latches True.
+        """
+        if cpf not in self.dist:
+            self.dist[cpf] = dist_now
+        else:
+            self.dist[cpf] = min(self.dist[cpf], dist_now)
+        if cpf not in self.tinconf:
+            self.tinconf[cpf] = simt
+        # Intrusion tracking
+        if in_los:
+            self.intrusion_occurred[cpf] = True
+            if cpf not in self.tLOS:
+                self.tLOS[cpf] = simt
+        elif cpf not in self.intrusion_occurred:
+            self.intrusion_occurred[cpf] = False
+
+    def _clear_conflict_state(self, cpf):
+        """Discard the per-event state of a conflict that has just ended.
+
+        Every value _note_conflict_state writes is guarded write-once or
+        accumulated, so without this a pair re-entering confpairs logs its
+        SECOND row carrying the FIRST event's tinconf, an inherited intrusion
+        flag, and a dist minimised across both events. Downstream that corrupts
+        n_conflicts (the postprocessing dedup key is (pair, tinconf), so
+        re-detections collapse into one row), n_intrusions, and
+        gap_to_prev_resolution_s (which goes negative for exactly the
+        re-detections it measures). Fixed 2026-08-20; logs written before that
+        date still carry the defect.
+
+        Deliberately NOT cleared:
+          toutconf            persists across events on purpose -- the
+                              re-detection gap is tinconf_k - toutconf_{k-1}.
+          dcpa/dalt/tcpa/qdr  re-assigned every tick the pair is in confpairs,
+                              so they cannot go stale within an event.
+          init_*              already per-event: their capture is guarded by
+                              `up not in self.duration`, and duration IS
+                              deleted at the end of every event.
+        """
+        self.tinconf.pop(cpf, None)
+        self.dist.pop(cpf, None)
+        self.tLOS.pop(cpf, None)
+        self.intrusion_occurred.pop(cpf, None)
+
+    # ------------------------------------------------------------------
     @core.timed_function(name='LOGGERFF_ASAS', dt=1.0)
     def update(self, dt):
         """
@@ -521,20 +576,15 @@ class LoggerffAsas(Entity):
                 self.dalt[cpf] = np.asarray(traf.cd.dalt)[i]
                 self.tcpa[cpf] = np.asarray(traf.cd.tcpa)[i]
                 self.qdr[cpf]  = np.asarray(traf.cd.qdr)[i]
-                dist_now       = np.asarray(traf.cd.dist)[i]
-                if cpf not in self.dist:
-                    self.dist[cpf] = dist_now
-                else:
-                    self.dist[cpf] = min(self.dist[cpf], dist_now)
-                if cpf not in self.tinconf:
-                    self.tinconf[cpf] = sim.simt
-                # Intrusion tracking
-                if cpf in traf.cd.lospairs_unique:
-                    self.intrusion_occurred[cpf] = True
-                    if cpf not in self.tLOS:
-                        self.tLOS[cpf] = sim.simt
-                elif cpf not in self.intrusion_occurred:
-                    self.intrusion_occurred[cpf] = False
+                # dcpa/dalt/tcpa/qdr above are per-TICK (last value wins);
+                # everything below is per-EVENT and is discarded when the
+                # event ends -- see _note_conflict_state/_clear_conflict_state.
+                self._note_conflict_state(
+                    cpf,
+                    dist_now=np.asarray(traf.cd.dist)[i],
+                    simt=sim.simt,
+                    in_los=cpf in traf.cd.lospairs_unique,
+                )
 
         # --- New conflict pair detection & initial state capture ---
         for pair in traf.cd.confpairs:
@@ -627,6 +677,9 @@ class LoggerffAsas(Entity):
                 )
                 del self.duration[pair]
                 self.toutconf[cpf] = sim.simt
+                # The event is over: drop its accumulated state so a
+                # re-detection of this pair starts clean (2026-08-20).
+                self._clear_conflict_state(cpf)
 
         # ==============================================================
         # 5. FLIGHT-STATE LOGGING  (extended)
