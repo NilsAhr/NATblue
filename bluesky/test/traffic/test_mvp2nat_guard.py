@@ -128,6 +128,43 @@ class TestVsAnchors:
         r._update_vs_anchors(["GHOST"], {})
         assert r._vs_anchor == {}
 
+    def test_anchor_survives_the_conflict_ending_while_asas_still_owns_the_ac(
+            self, traffic_):
+        """REGRESSION (20250714 smoke cell, 271/568 aircraft ran away).
+
+        `timesolveV` reverts to 1e9 the moment the pair leaves confpairs, but
+        resume-nav keeps `active` True until it releases the aircraft, and
+        update() keeps re-running resolve() while ANY pair is in conflict. If
+        the anchor is dropped at that point the altitude clamp is skipped while
+        the command is still applied, asasalttemp becomes a moving target below
+        the CURRENT altitude, and the aircraft chases it into the ground
+        (-23 308 ft observed).
+
+        So: an aircraft that is still ASAS-active must KEEP its original
+        anchor even after its vertical solve has gone away.
+        """
+        r = MVP2NAT()
+        # tick 1: conflict present, anchor captured at FL317
+        r._update_vs_anchors(["AC1"], {"AC1": 31703.0 * FT})
+        assert r._vs_anchor["AC1"] == 31703.0 * FT
+        # tick 2..N: conflict gone but resume-nav has not released the aircraft,
+        # so it is still in the engaged set and the anchor must NOT move down
+        for alt_ft in (27482.0, 14784.0, 2087.0, -2146.0):
+            r._update_vs_anchors(["AC1"], {"AC1": alt_ft * FT})
+            assert r._vs_anchor["AC1"] == 31703.0 * FT, alt_ft
+
+    def test_the_clamp_bounds_the_descent_once_the_anchor_is_held(self,
+                                                                 traffic_):
+        """With the anchor held, the commanded altitude cannot fall further
+        than _MAX_VNAV_DEV_M below the engagement altitude, so the aircraft
+        levels off instead of descending indefinitely."""
+        anchor = np.array([31703.0 * FT])
+        runaway_target = np.array([-23308.0 * FT])      # the observed command
+        _, out_alt = MVP2NAT._clamp_vertical(np.array([0.0]), runaway_target,
+                                             anchor)
+        assert np.isclose(out_alt[0], anchor[0] - _MAX_VNAV_DEV_M)
+        assert out_alt[0] > 0.0                          # above ground
+
 
 # ---------------------------------------------------------------------------
 # Isolated-domain channel ownership

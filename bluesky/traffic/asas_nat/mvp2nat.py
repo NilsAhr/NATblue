@@ -633,8 +633,30 @@ class MVP2NAT(ConflictResolution):
         # the guard here keeps HYBRID3/iter3b byte-identical. An aircraft counts
         # as vertically engaged when MVP found a vertical solve time inside the
         # lookahead — the same condition that gates asasalttemp above.
-        engaged = [ownship.id[i] for i in
-                   np.flatnonzero(timesolveV < conf.dtlookahead)]
+        # The anchor must be held for as long as ASAS OWNS this aircraft's
+        # vertical channel -- self.active, the flag the resume-nav method
+        # maintains and the one altactive/vsactive return -- NOT merely while a
+        # vertical solve exists.
+        #
+        # Anchoring on `timesolveV < dtlookahead` alone dropped the reference at
+        # precisely the tick the ratchet begins. timesolveV reverts to 1e9 the
+        # moment the pair leaves confpairs, but update() keeps re-running
+        # resolve() while ANY pair in the traffic is in conflict, and
+        # resume-nav keeps `active` True until it releases the aircraft. With no
+        # anchor the altitude clamp is skipped while the command is still
+        # applied, and asasalttemp is then a moving target ~_MAX_DH_M below the
+        # CURRENT altitude every tick -- so the aircraft chases it down forever.
+        # Measured on 20250714 (dom_vert_dt500_pastcpa): 271 of 568 engaged
+        # aircraft ran away, worst case -23 308 ft, i.e. through the ground,
+        # ~1200 s after their conflict had already cleared.
+        #
+        # OR-ing the two conditions also covers the first tick, when a vertical
+        # solve exists but resume-nav has not yet set `active`.
+        act = np.asarray(self.active, dtype=bool)
+        if act.size < ownship.ntraf:                 # array not yet grown
+            act = np.zeros(ownship.ntraf, dtype=bool)
+        engaged_mask = act[:ownship.ntraf] | (timesolveV < conf.dtlookahead)
+        engaged = [ownship.id[i] for i in np.flatnonzero(engaged_mask)]
         self._update_vs_anchors(
             engaged, {ownship.id[i]: ownship.alt[i] for i in range(ownship.ntraf)})
         anchor = np.full(ownship.ntraf, np.nan)
