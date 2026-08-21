@@ -165,6 +165,12 @@ class MVP2NAT(ConflictResolution):
         self._sw_symbreak      = True
         self._sw_vs_cap        = True
         self._sw_alt_anchor    = True
+        #   _sw_vert_diverge   do not apply the vertical resolution to a pair
+        #                      whose vertical gap is already growing. Without
+        #                      it the symmetry breaker and the normal MVP
+        #                      branch fight each other every tick (BUG-01; see
+        #                      the guard in MVP()).
+        self._sw_vert_diverge  = True
 
         # Co-track hold knobs (resolver sweep, 2026-08-06). Instance-level so the
         # derived HYBRID3 variants can vary the hold WITHOUT touching the module
@@ -830,6 +836,34 @@ class MVP2NAT(ConflictResolution):
                     tsolV = tLOS
                     iV = hpz_m
                 dv3 = (iV / tsolV) if tsolV != 0.0 else 0.0
+        elif self._sw_vert_diverge and drel[2] * vrel[2] > 0.0:
+            # --- The pair is already SEPARATING vertically: do nothing -------
+            # BUG-01 (synthetic L05, 2026-08-21). MVP's vertical rule below is
+            # a convergence-NULLING rule: dv3 is chosen to oppose the current
+            # relative vertical rate. Applied to a pair whose gap is already
+            # growing, it commands them back together -- and that is exactly
+            # the state the symmetry breaker creates one tick earlier.
+            #
+            # The result was a period-2 limit cycle: the breaker splits the
+            # pair, the split produces |vrel_z| = 270 fpm = 1.37 m/s (13x the
+            # 0.1 m/s floor), so the next tick takes the normal branch and
+            # reverses it, the rates collapse back under the floor, the breaker
+            # fires again. Logged on L05 as commanded altitudes alternating
+            # -499 / +499 ft at +/-3000 fpm every single tick, for 4740 s,
+            # achieving 51 ft of separation. On the head-on scenarios the same
+            # cycle capped the split at ~668 ft against a 1000 ft HPZ, leaving
+            # a residual intrusion in S01, S02D, S03 and S10.
+            #
+            # `drel[2] * vrel[2] > 0` is exactly "the gap is growing", since
+            # d|drel_z|/dt has the sign of drel_z * vrel_z. In that regime the
+            # vertical geometry is resolving itself and the resolver has
+            # nothing to add, so leave the rate alone. tsolV is left at the
+            # horizontal LoS time so the downstream altitude command becomes
+            # "hold the rate you already have", which continues the separation
+            # instead of freezing it.
+            iV    = hpz_m
+            tsolV = tLOS if tLOS > 0.0 else _SYM_BREAK_TSOLV_MAX
+            dv3   = 0.0
         elif abs(vrel[2]) > _VREL_VERT_FLOOR:
             # --- Normal case: meaningful relative vertical speed ---
             iV    = hpz_m
@@ -1311,11 +1345,16 @@ _LADDER = [
     ("L5", ["_sw_vs_cap"]),                  # commanded vertical RATE cap
     ("L6", ["_sw_alt_anchor"]),              # cumulative bound => full guard
     ("L7", ["_isolate_domain"]),             # per-domain channel ownership
+    # L8 is the BUG-01 fix (2026-08-21). It is kept as its own layer, and
+    # deliberately ABOVE L7, so that L7 still reproduces the pre-fix behaviour
+    # and the before/after is measurable at one SHA -- the same reason the
+    # *_LEGACY classes exist. L8 therefore equals today's MVP2NAT_<DOMAIN>.
+    ("L8", ["_sw_vert_diverge"]),            # do not fight a diverging pair
 ]
 
 _ALL_SWITCHES = ["_sw_perf_limits", "_sw_erratum_floor", "_sw_dh_cap",
                  "_sw_symbreak", "_sw_vs_cap", "_sw_alt_anchor",
-                 "_isolate_domain"]
+                 "_isolate_domain", "_sw_vert_diverge"]
 
 # Domain flag sets, matching the four isolated-domain classes above.
 _DOMAINS = {
