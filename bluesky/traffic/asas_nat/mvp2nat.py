@@ -171,6 +171,17 @@ class MVP2NAT(ConflictResolution):
         #                      branch fight each other every tick (BUG-01; see
         #                      the guard in MVP()).
         self._sw_vert_diverge  = True
+        #   _sw_vert_hold      stop the vertical manoeuvre once every conflict
+        #                      of that aircraft is vertically satisfied, and
+        #                      hold the level reached. Without it the size of
+        #                      the manoeuvre is set by _MAX_DH_M rather than by
+        #                      the geometry (BUG-04).
+        self._sw_vert_hold     = True
+
+        # {callsign: hold altitude [m]} for aircraft whose vertical
+        # requirement is met. Captured once, never moved while held -- see
+        # _update_vert_hold.
+        self._vert_hold = {}
 
         # Co-track hold knobs (resolver sweep, 2026-08-06). Instance-level so the
         # derived HYBRID3 variants can vary the hold WITHOUT touching the module
@@ -189,6 +200,7 @@ class MVP2NAT(ConflictResolution):
         self._speed_state.clear()
         self._hold.clear()
         self._vs_anchor.clear()
+        self._vert_hold.clear()
 
     def setprio(self, flag=None, priocode=''):
         '''Set the prio switch and the type of prio '''
@@ -401,6 +413,47 @@ class MVP2NAT(ConflictResolution):
             alt[ok] = np.clip(alt[ok], a[ok] - max_dev, a[ok] + max_dev)
         return vs, alt
 
+    # ── Vertical hold: stop once the requirement is met (BUG-04) ────────────
+    @staticmethod
+    def _vert_satisfied(dalt, dvs, hpz_req):
+        ''' Does this pair still need a vertical resolution?
+
+            False while the pair is vertically CONVERGING, or while the gap is
+            smaller than the required minimum. True once the gap is at least
+            the requirement and is not shrinking -- at which point the vertical
+            geometry is solved and any further manoeuvre is pure cost.
+
+            dalt / dvs are intruder-minus-ownship, so the test is symmetric:
+            both orderings of a pair get the same answer, which matters because
+            if only one aircraft holds, the other keeps climbing.
+        '''
+        converging = dalt * dvs < 0.0
+        return bool((not converging) and abs(dalt) >= hpz_req)
+
+    def _update_vert_hold(self, satisfied_ids, alt_by_id):
+        ''' Maintain {callsign: hold altitude [m]} for vertically-solved aircraft.
+
+            Same lifecycle as _update_vs_anchors, and for the same reason: the
+            target is captured ONCE, when the aircraft first becomes satisfied,
+            and never moved while it stays satisfied. A target recomputed from
+            the current altitude every tick is exactly the ratchet that made
+            the original runaway dive unbounded.
+
+            Dropped as soon as the aircraft stops being satisfied, so a pair
+            that re-converges is resolved again rather than held at a level
+            that is no longer safe.
+        '''
+        if not self._sw_vert_hold:
+            self._vert_hold.clear()
+            return
+        sat = set(satisfied_ids)
+        for cs in list(self._vert_hold):
+            if cs not in sat:
+                del self._vert_hold[cs]
+        for cs in sat:
+            if cs not in self._vert_hold and cs in alt_by_id:
+                self._vert_hold[cs] = float(alt_by_id[cs])
+
     def _update_vs_anchors(self, engaged_ids, alt_by_id):
         ''' Maintain {callsign: anchor altitude [m]} for the dive guard.
 
@@ -496,6 +549,11 @@ class MVP2NAT(ConflictResolution):
         # Initialize an array to store time needed to resolve vertically
         timesolveV = np.ones(ownship.ntraf) * 1e9
 
+        # Per-ownship: is EVERY one of its conflicts vertically satisfied?
+        # Starts True and is AND-ed down, so an aircraft with any unsolved
+        # vertical conflict is never held.
+        vert_ok = {}
+
         fb_enabled = self.swfallbackhdg and self.swresovert
         # Heading fallback (H2): rebuild the per-tick map of ownship callsigns
         # being actively turned. An entry exists only while that aircraft is
@@ -515,6 +573,12 @@ class MVP2NAT(ConflictResolution):
             # Because ADSB is ON, this is done for each aircraft separately
             if idx1 >-1 and idx2 > -1:
                 dv_mvp, tsolV, dabsH = self.MVP(ownship, intruder, conf, qdr, dist, tcpa, tLOS, idx1, idx2)
+
+                ok = self._vert_satisfied(
+                    intruder.alt[idx2] - ownship.alt[idx1],
+                    intruder.vs[idx2] - ownship.vs[idx1],
+                    np.max(conf.hpz[[idx1, idx2]] * self.resofacv))
+                vert_ok[idx1] = vert_ok.get(idx1, True) and ok
                 if tsolV < timesolveV[idx1]:
                     timesolveV[idx1] = tsolV
 
@@ -725,6 +789,28 @@ class MVP2NAT(ConflictResolution):
         vscapped, alt = self._clamp_vertical(
             vscapped, alt, anchor,
             max_vs=_MAX_RESO_VS if self._sw_vs_cap else np.inf)
+
+        # Vertical hold (BUG-04): an aircraft whose every conflict is
+        # vertically satisfied stops manoeuvring and holds the level it
+        # reached, until resume-nav releases it. Placed AFTER the dive guard so
+        # the guard cannot drag the held target around, and it deliberately
+        # does NOT hand the channel back to VNAV: returning to the profile
+        # while the pair is still in conflict would fly the aircraft straight
+        # back into the conflict it just solved.
+        if self._sw_vert_hold and (self.swresovert and not self.swresohoriz):
+            self._update_vert_hold(
+                [ownship.id[i] for i in vert_ok if vert_ok[i]],
+                {ownship.id[i]: ownship.alt[i] for i in range(ownship.ntraf)})
+            if self._vert_hold:
+                alt = np.array(alt, dtype=float, copy=True)
+                vscapped = np.array(vscapped, dtype=float, copy=True)
+                for cs, target in self._vert_hold.items():
+                    idx = bs.traf.id2idx(cs)
+                    if idx >= 0:
+                        alt[idx] = target
+                        vscapped[idx] = 0.0
+        elif self._vert_hold:
+            self._vert_hold.clear()
 
         # Co-track FL-hold override (iter 3): held (trailing) aircraft fly a FIXED
         # target altitude (bounded VS toward it, so no runaway) and a reduced TAS,
@@ -1350,11 +1436,16 @@ _LADDER = [
     # and the before/after is measurable at one SHA -- the same reason the
     # *_LEGACY classes exist. L8 therefore equals today's MVP2NAT_<DOMAIN>.
     ("L8", ["_sw_vert_diverge"]),            # do not fight a diverging pair
+    # L9 is the BUG-04 fix: stop once the vertical requirement is met, instead
+    # of flying to the _MAX_DH_M target. Separated from L8 because the two are
+    # independently useful -- L8 makes the resolver work at all, L9 makes it
+    # cheap -- and the ladder is how that separation is measured.
+    ("L9", ["_sw_vert_hold"]),               # hold once vertically satisfied
 ]
 
 _ALL_SWITCHES = ["_sw_perf_limits", "_sw_erratum_floor", "_sw_dh_cap",
                  "_sw_symbreak", "_sw_vs_cap", "_sw_alt_anchor",
-                 "_isolate_domain", "_sw_vert_diverge"]
+                 "_isolate_domain", "_sw_vert_diverge", "_sw_vert_hold"]
 
 # Domain flag sets, matching the four isolated-domain classes above.
 _DOMAINS = {

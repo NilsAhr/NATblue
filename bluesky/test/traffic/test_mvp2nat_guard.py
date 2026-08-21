@@ -228,8 +228,8 @@ class TestChannelOwnership:
 # ---------------------------------------------------------------------------
 from bluesky.traffic.asas_nat.mvp2nat import (            # noqa: E402
     MVP2NAT_STOCK, MVP2NAT_STOCK_VERT, MVP2NAT_VERT_L0, MVP2NAT_VERT_L4,
-    MVP2NAT_VERT_L7, MVP2NAT_VERT_L8, MVP2NAT_SPD_L8, MVP2NAT_HDG_L8,
-    MVP2NAT_BOTH_L8,
+    MVP2NAT_VERT_L7, MVP2NAT_VERT_L8, MVP2NAT_VERT_L9, MVP2NAT_SPD_L9,
+    MVP2NAT_HDG_L9, MVP2NAT_BOTH_L9,
     _ALL_SWITCHES, _LADDER, _DOMAINS)
 import bluesky.traffic.asas_nat.mvp2nat as _m             # noqa: E402
 
@@ -271,10 +271,10 @@ class TestAblationLadder:
         # The TOP layer is the production class. L8 became the top when the
         # BUG-01 divergence guard was added; L7 is deliberately left at the
         # pre-fix state so the before/after is measurable at one SHA.
-        for lad, dom in ((MVP2NAT_VERT_L8, MVP2NAT_VERT),
-                         (MVP2NAT_SPD_L8, MVP2NAT_SPD),
-                         (MVP2NAT_HDG_L8, MVP2NAT_HDG),
-                         (MVP2NAT_BOTH_L8, MVP2NAT_BOTH)):
+        for lad, dom in ((MVP2NAT_VERT_L9, MVP2NAT_VERT),
+                         (MVP2NAT_SPD_L9, MVP2NAT_SPD),
+                         (MVP2NAT_HDG_L9, MVP2NAT_HDG),
+                         (MVP2NAT_BOTH_L9, MVP2NAT_BOTH)):
             assert _switches(lad) == _switches(dom), lad.__name__
             a, b = lad(), dom()
             for f in ("swresohoriz", "swresospd", "swresohdg", "swresovert"):
@@ -284,8 +284,14 @@ class TestAblationLadder:
         # L7 must keep _sw_vert_diverge OFF and everything else ON, so that
         # "L7 vs L8" isolates exactly the BUG-01 fix.
         sw = _switches(MVP2NAT_VERT_L7)
-        assert sw["_sw_vert_diverge"] is False
-        assert all(v for k, v in sw.items() if k != "_sw_vert_diverge")
+        assert sw["_sw_vert_diverge"] is False and sw["_sw_vert_hold"] is False
+        assert all(v for k, v in sw.items()
+                   if k not in ("_sw_vert_diverge", "_sw_vert_hold"))
+
+    def test_l8_is_bug01_only(self, traffic_):
+        # L8 vs L9 isolates the BUG-04 cost fix from the BUG-01 safety fix.
+        sw = _switches(MVP2NAT_VERT_L8)
+        assert sw["_sw_vert_diverge"] is True and sw["_sw_vert_hold"] is False
 
     def test_symbreak_layer_is_where_the_breaker_turns_on(self, traffic_):
         # L4 is the layer the "head-on, both aircraft descend" report is
@@ -415,3 +421,81 @@ class TestVerticalDivergenceGuard:
         cr = MVP2NAT()
         cr._sw_vert_diverge = False
         assert self._dv3(cr, [35000.0, 35051.0], [-132.0, 138.0]) != 0.0
+
+
+# ---------------------------------------------------------------------------
+# Vertical hold (BUG-04, found 2026-08-21 on synthetic S01 after the BUG-01 fix)
+#
+# Observed: the pair needed 1050 ft of vertical separation (HPZ 1000 x RFACV
+# 1.05) and built 4305 ft -- each aircraft flew ~2150 ft, four times the
+# requirement, and stayed there until resume-nav let go.
+#
+# Mechanism: once the divergence guard sets dv3 = 0, the commanded altitude is
+# asasalttemp = clip(vs * tsolV, +/- _MAX_DH_M) + alt, i.e. the aircraft is
+# told to continue to a point _MAX_DH_M (2000 ft) away. Nothing in that
+# expression knows how much separation the conflict actually required, so the
+# manoeuvre size is set by a constant instead of by the geometry.
+#
+# The fix stops the vertical manoeuvre once every conflict of that aircraft is
+# vertically satisfied -- separated by at least the required minimum AND not
+# converging -- and holds the level reached until resume-nav releases it.
+# Holding rather than returning to profile is deliberate: returning early would
+# fly the aircraft back into the conflict it just solved.
+# ---------------------------------------------------------------------------
+class TestVerticalHold:
+    """MVP2NAT._vert_hold_target: stop climbing once the requirement is met."""
+
+    def test_no_hold_while_still_converging(self, traffic_):
+        cr = MVP2NAT()
+        # 3000 ft apart but closing: the resolver must stay engaged.
+        assert cr._vert_satisfied(dalt=3000.0 * FT, dvs=-500.0 * FPM,
+                                  hpz_req=1050.0 * FT) is False
+
+    def test_no_hold_while_separation_is_insufficient(self, traffic_):
+        cr = MVP2NAT()
+        # Diverging, but only 400 ft apart against a 1050 ft requirement.
+        assert cr._vert_satisfied(dalt=400.0 * FT, dvs=500.0 * FPM,
+                                  hpz_req=1050.0 * FT) is False
+
+    def test_hold_once_diverging_and_separated(self, traffic_):
+        cr = MVP2NAT()
+        assert cr._vert_satisfied(dalt=1100.0 * FT, dvs=500.0 * FPM,
+                                  hpz_req=1050.0 * FT) is True
+
+    def test_sign_symmetric(self, traffic_):
+        # Both orderings of the pair see the same answer; if only one holds,
+        # one aircraft levels off while the other keeps going.
+        cr = MVP2NAT()
+        assert cr._vert_satisfied(dalt=-1100.0 * FT, dvs=-500.0 * FPM,
+                                  hpz_req=1050.0 * FT) is True
+
+    def test_level_pair_at_sufficient_separation_holds(self, traffic_):
+        # Diverging is "not converging", so a pair that is far enough apart and
+        # steady needs no vertical action either.
+        cr = MVP2NAT()
+        assert cr._vert_satisfied(dalt=1100.0 * FT, dvs=0.0,
+                                  hpz_req=1050.0 * FT) is True
+
+    def test_hold_target_is_captured_once_and_held(self, traffic_):
+        cr = MVP2NAT()
+        cr._vert_hold.clear()
+        cr._update_vert_hold(["AC1"], {"AC1": 35000.0 * FT})
+        first = cr._vert_hold["AC1"]
+        # A later tick at a different altitude must NOT move the target,
+        # otherwise the hold ratchets exactly like the pre-guard dive did.
+        cr._update_vert_hold(["AC1"], {"AC1": 34000.0 * FT})
+        assert cr._vert_hold["AC1"] == first
+
+    def test_hold_is_dropped_when_the_aircraft_is_no_longer_satisfied(self, traffic_):
+        cr = MVP2NAT()
+        cr._vert_hold.clear()
+        cr._update_vert_hold(["AC1"], {"AC1": 35000.0 * FT})
+        cr._update_vert_hold([], {"AC1": 35000.0 * FT})
+        assert "AC1" not in cr._vert_hold
+
+    def test_switch_off_disables_the_hold(self, traffic_):
+        cr = MVP2NAT()
+        cr._sw_vert_hold = False
+        cr._vert_hold.clear()
+        cr._update_vert_hold(["AC1"], {"AC1": 35000.0 * FT})
+        assert cr._vert_hold == {}
