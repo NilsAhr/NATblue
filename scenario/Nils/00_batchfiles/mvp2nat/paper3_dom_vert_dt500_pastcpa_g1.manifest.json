@@ -1,6 +1,6 @@
 {
   "generator": "make_batchfiles_paper3.py",
-  "generated_at": "2026-08-20T14:36:38",
+  "generated_at": "2026-08-20T16:23:57",
   "batch_file": "C:\\Users\\ahre_ni\\NATBlue\\scenario\\Nils\\00_batchfiles\\mvp2nat\\paper3_dom_vert_dt500_pastcpa_g1.scn",
   "tag": "dom_vert_dt500_pastcpa",
   "reso": "MVP2NAT_VERT",
@@ -20,7 +20,7 @@
     "Nils/mvp2nat/paper3/conf_20250714.scn"
   ],
   "mvp2nat_git": {
-    "sha": "2948e50cfb1d89e2a0fdc0181b68781acd4a0574",
+    "sha": "51dbf7af961063b76de728636974d9551406f750",
     "branch": "paper3-ftr",
     "asas_nat_dirty": false
   }
