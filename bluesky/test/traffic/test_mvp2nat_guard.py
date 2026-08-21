@@ -211,3 +211,102 @@ class TestChannelOwnership:
         # None is the sentinel that tells the channel properties to fall through
         # to legacy behaviour, so it must not be confused with an empty array.
         assert MVP2NAT()._isolated("tas") is None
+
+
+# ---------------------------------------------------------------------------
+# Ablation ladder + stock reference (synthetic suite, 2026-08-21)
+#
+# The ladder puts every mvp2nat mechanism behind a switch so the synthetic
+# scenarios can attribute a behaviour change to ONE mechanism at a single git
+# SHA. That is only sound if two things hold, and both are pinned here:
+#   * the fully-enabled layer reproduces the original class exactly, and
+#   * the default class still has every mechanism ON, so nothing that already
+#     works changes.
+# The at-scale version of the first check is compare_runs.py, which asserts
+# MVP2NAT_VERT_L7 and MVP2NAT_VERT produce the same trajectories; these tests
+# are the cheap version that runs in milliseconds.
+# ---------------------------------------------------------------------------
+from bluesky.traffic.asas_nat.mvp2nat import (            # noqa: E402
+    MVP2NAT_STOCK, MVP2NAT_STOCK_VERT, MVP2NAT_VERT_L0, MVP2NAT_VERT_L4,
+    MVP2NAT_VERT_L7, MVP2NAT_SPD_L7, MVP2NAT_HDG_L7, MVP2NAT_BOTH_L7,
+    _ALL_SWITCHES, _LADDER, _DOMAINS)
+import bluesky.traffic.asas_nat.mvp2nat as _m             # noqa: E402
+
+
+def _switches(cls):
+    obj = cls()
+    return {s: getattr(obj, s) for s in _ALL_SWITCHES}
+
+
+class TestAblationLadder:
+    """The switch grid itself -- pure __init__ bookkeeping, no fixture needed."""
+
+    def test_default_mvp2nat_has_every_mechanism_on(self):
+        # The whole refactor is safe only because the default is unchanged.
+        sw = _switches(MVP2NAT)
+        assert all(sw[s] for s in _ALL_SWITCHES if s != "_isolate_domain")
+        assert sw["_isolate_domain"] is False       # base never isolates
+
+    def test_l0_is_stock_every_switch_off(self):
+        assert all(v is False for v in _switches(MVP2NAT_VERT_L0).values())
+
+    def test_ladder_is_cumulative(self):
+        # Each layer must be a strict superset of the previous one, otherwise
+        # a layer could silently turn a mechanism back OFF and the attribution
+        # of any observed change would be wrong.
+        seen = set()
+        for _, adds in _LADDER:
+            assert not (set(adds) & seen), "layer re-enables %s" % adds
+            seen |= set(adds)
+        assert seen == set(_ALL_SWITCHES), "ladder does not cover every switch"
+
+    def test_every_ladder_class_exists_for_every_domain(self):
+        for dom in _DOMAINS:
+            for layer, _ in _LADDER:
+                name = "MVP2NAT_%s_%s" % (dom, layer)
+                assert hasattr(_m, name), "missing " + name
+
+    def test_top_layer_matches_the_isolated_domain_class(self):
+        for lad, dom in ((MVP2NAT_VERT_L7, MVP2NAT_VERT),
+                         (MVP2NAT_SPD_L7, MVP2NAT_SPD),
+                         (MVP2NAT_HDG_L7, MVP2NAT_HDG),
+                         (MVP2NAT_BOTH_L7, MVP2NAT_BOTH)):
+            assert _switches(lad) == _switches(dom), lad.__name__
+            a, b = lad(), dom()
+            for f in ("swresohoriz", "swresospd", "swresohdg", "swresovert"):
+                assert getattr(a, f) == getattr(b, f), (lad.__name__, f)
+
+    def test_symbreak_layer_is_where_the_breaker_turns_on(self):
+        # L4 is the layer the "head-on, both aircraft descend" report is
+        # attributed to: below it the co-altitude sign term is stock's.
+        assert _switches(MVP2NAT_VERT_L0)["_sw_symbreak"] is False
+        assert _switches(MVP2NAT_VERT_L4)["_sw_symbreak"] is True
+
+    def test_ladder_never_enables_a_hybrid_channel(self):
+        # The ladder isolates the BASE resolver; the hybrid controller is out
+        # of scope, and a stray FL-hold would contaminate every layer above it.
+        for dom in _DOMAINS:
+            for layer, _ in _LADDER:
+                o = getattr(_m, "MVP2NAT_%s_%s" % (dom, layer))()
+                assert o.swfallbackhdg is False
+                assert o.swspeedcotrack is False
+                assert o.swaltholdcotrack is False
+
+
+class TestStockReference:
+    """MVP2NAT_STOCK reproduces stock MVP's algorithm, not its unit bug."""
+
+    def test_stock_has_every_mechanism_off(self):
+        assert all(v is False for v in _switches(MVP2NAT_STOCK).values())
+
+    def test_stock_uses_stock_domain_defaults(self):
+        # Stock MVP defaults to HORIZONTAL (mvp.py:12-18); mvp2nat inverted
+        # that to vertical, so the reference has to invert it back.
+        o = MVP2NAT_STOCK()
+        assert (o.swresohoriz, o.swresospd, o.swresohdg, o.swresovert) == \
+               (True, True, True, False)
+
+    def test_stock_vert_is_the_rmethv_configuration(self):
+        o = MVP2NAT_STOCK_VERT()
+        assert (o.swresovert, o.swresohoriz) == (True, False)
+        assert all(v is False for v in _switches(o.__class__).values())

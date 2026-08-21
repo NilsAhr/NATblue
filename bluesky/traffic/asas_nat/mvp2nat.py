@@ -3,8 +3,6 @@
     the near-ceiling climb-into-PZ case it targeted does not appear in the NAT
     scenario, and the trigger fired for normal cruise pairs and blocked MVP's
     legitimate vertical separation commands. '''
-from collections import deque
-
 import numpy as np
 import bluesky as bs
 from bluesky import stack
@@ -136,6 +134,37 @@ class MVP2NAT(ConflictResolution):
         # inheriting self.active) and MVP2NAT_VERT also holds track — i.e. a
         # "single-domain" run silently commands three channels.
         self._isolate_domain = False
+
+        # ── Mechanism switches (synthetic-suite ablation, 2026-08-21) ────────
+        # Every mechanism mvp2nat added on top of stock MVP is individually
+        # switchable. All default True, so MVP2NAT and every existing subclass
+        # behave exactly as before -- the switches exist so the LAYER classes
+        # below can enable them cumulatively and the synthetic suite can
+        # attribute a behaviour change to one specific mechanism at a SINGLE
+        # git SHA. Reverting the file commit-by-commit would put each layer on
+        # a different SHA, make them un-runnable in one batch, and risk losing
+        # the 3b5f29ee / 2948e50c fixes.
+        #
+        #   _sw_perf_limits    route the speed/VS cap through perf.limits
+        #                      (BADA-aware, couples the two) instead of stock's
+        #                      two independent clips against the envelope.
+        #   _sw_erratum_floor  floor the erratum divisor at sin(15 deg) so
+        #                      near-tangent in-trail geometry cannot blow up.
+        #   _sw_dh_cap         cap the commanded altitude STEP at _MAX_DH_M.
+        #   _sw_symbreak       co-altitude symmetry breaker + ceiling guard.
+        #                      OFF reproduces stock's undefined sign term,
+        #                      which hands BOTH aircraft the same dv3.
+        #   _sw_vs_cap         hard cap on the commanded vertical RATE.
+        #   _sw_alt_anchor     cumulative altitude bound around the engagement
+        #                      anchor. This is the half that actually stopped
+        #                      the runaway: the VS cap held throughout while
+        #                      271 of 568 aircraft still dived (2948e50c).
+        self._sw_perf_limits   = True
+        self._sw_erratum_floor = True
+        self._sw_dh_cap        = True
+        self._sw_symbreak      = True
+        self._sw_vs_cap        = True
+        self._sw_alt_anchor    = True
 
         # Co-track hold knobs (resolver sweep, 2026-08-06). Instance-level so the
         # derived HYBRID3 variants can vary the hold WITHOUT touching the module
@@ -586,19 +615,36 @@ class MVP2NAT(ConflictResolution):
 
         # Single, BADA-/OpenAP-aware cap applied in TAS domain.
         # Returns: allowed TAS, capped VS, (third value unused).
-        allowed_tas, vscapped, _ = ownship.perf.limits(
-            newtas, newvs, ownship.alt, bs.traf.ax)
+        if self._sw_perf_limits:
+            allowed_tas, vscapped, _ = ownship.perf.limits(
+                newtas, newvs, ownship.alt, bs.traf.ax)
+        else:
+            # Stock MVP's caps: two independent clips against the envelope,
+            # with no coupling between the speed and the vertical rate. Stock
+            # also returns GROUND speed here (mvp.py:239 newgscapped) while
+            # aporasas feeds cr.tas straight into the TAS channel -- this
+            # branch deliberately does NOT reproduce that unit error, since
+            # the point is to compare the ALGORITHM, not to re-inject a bug
+            # the fork already documents (ticket 07, trap 8).
+            allowed_tas = np.maximum(ownship.perf.vmin,
+                                     np.minimum(ownship.perf.vmax, newtas))
+            vscapped = np.maximum(ownship.perf.vsmin,
+                                  np.minimum(ownship.perf.vsmax, newvs))
 
         # Calculate if Autopilot selected altitude should be followed. This avoids ASAS from
         # climbing or descending longer than it needs to if the autopilot leveloff
         # altitude also resolves the conflict. Because asasalttemp is calculated using
         # the time to resolve, it may result in climbing or descending more than the selected
         # altitude.
-        # Cap |dh| at 5000 ft. In-trail same-altitude geometries can yield
-        # tiny vrel[2] -> tsolV collapsed to tLOS, and tLOS * vsmax can push
-        # the altitude target far beyond any sensible resolution. The cap
-        # lets the resolver give up gracefully on geometries it cannot handle.
-        dh = np.clip(vscapped * timesolveV, -_MAX_DH_M, _MAX_DH_M)
+        # Cap |dh| at _MAX_DH_M (2000 ft). In-trail same-altitude geometries
+        # can yield tiny vrel[2] -> tsolV collapsed to tLOS, and tLOS * vsmax
+        # can push the altitude target far beyond any sensible resolution. The
+        # cap lets the resolver give up gracefully on geometries it cannot
+        # handle. NOTE this bounds the STEP against the CURRENT altitude, so it
+        # re-anchors every tick and a sustained descent ratchets straight
+        # through it -- that is what the anchor guard below exists to stop.
+        dh = (np.clip(vscapped * timesolveV, -_MAX_DH_M, _MAX_DH_M)
+              if self._sw_dh_cap else vscapped * timesolveV)
         asasalttemp = dh + ownship.alt
         signdvs = np.sign(vscapped - ownship.ap.vs * np.sign(ownship.selalt - ownship.alt))
         signalt = np.sign(asasalttemp - ownship.selalt)
@@ -657,14 +703,22 @@ class MVP2NAT(ConflictResolution):
             act = np.zeros(ownship.ntraf, dtype=bool)
         engaged_mask = act[:ownship.ntraf] | (timesolveV < conf.dtlookahead)
         engaged = [ownship.id[i] for i in np.flatnonzero(engaged_mask)]
-        self._update_vs_anchors(
-            engaged, {ownship.id[i]: ownship.alt[i] for i in range(ownship.ntraf)})
         anchor = np.full(ownship.ntraf, np.nan)
-        for cs, a in self._vs_anchor.items():
-            idx = bs.traf.id2idx(cs)
-            if idx >= 0:
-                anchor[idx] = a
-        vscapped, alt = self._clamp_vertical(vscapped, alt, anchor)
+        if self._sw_alt_anchor:
+            self._update_vs_anchors(
+                engaged,
+                {ownship.id[i]: ownship.alt[i] for i in range(ownship.ntraf)})
+            for cs, a in self._vs_anchor.items():
+                idx = bs.traf.id2idx(cs)
+                if idx >= 0:
+                    anchor[idx] = a
+        # An all-NaN anchor disables only the ALTITUDE bound; _clamp_vertical
+        # still applies the VS cap. Passing inf for max_vs turns that half off
+        # too, which keeps _clamp_vertical itself untouched -- its 8 unit tests
+        # pin the maths and must stay valid.
+        vscapped, alt = self._clamp_vertical(
+            vscapped, alt, anchor,
+            max_vs=_MAX_RESO_VS if self._sw_vs_cap else np.inf)
 
         # Co-track FL-hold override (iter 3): held (trailing) aircraft fly a FIXED
         # target altitude (bounded VS toward it, so no runaway) and a reduced TAS,
@@ -733,7 +787,8 @@ class MVP2NAT(ConflictResolution):
             # (alpha-beta) toward pi/2 and erratum toward 0, which makes
             # rpz_m/erratum blow up. The floor caps the angle at 75 deg
             # so the resolver backs out instead of emitting garbage.
-            erratum = max(erratum, _ERRATUM_FLOOR)
+            if self._sw_erratum_floor:
+                erratum = max(erratum, _ERRATUM_FLOOR)
             dv1 = ((rpz_m / erratum - dabsH) * dcpa[0]) / (abs(tcpa) * dabsH)
             dv2 = ((rpz_m / erratum - dabsH) * dcpa[1]) / (abs(tcpa) * dabsH)
         else:
@@ -749,7 +804,33 @@ class MVP2NAT(ConflictResolution):
         #                                   so plain MVP hands BOTH aircraft the
         #                                   same dv3 sign and they never separate.
         #                                   Use a deterministic symmetry breaker.
-        if abs(vrel[2]) > _VREL_VERT_FLOOR:
+        if not self._sw_symbreak:
+            # --- Stock MVP vertical resolution, reproduced verbatim ---------
+            # Kept as an ablation layer, not as a fallback: it is what the
+            # symmetry breaker replaced, and running it is how the "both
+            # aircraft descend into the ground" report is reproduced rather
+            # than assumed. When vrel[2] is exactly 0 the sign term
+            # -vrel[2]/|vrel[2]| is undefined, and stock's np.where fallback
+            # returns +iV/tsolV for BOTH orderings of the pair -- so with the
+            # downstream `dv[idx1] -= dv_mvp` accumulation both aircraft are
+            # commanded DOWN and never separate. The conditional below is
+            # numerically identical to stock's np.where on these scalars, but
+            # does not evaluate the divide-by-zero branch.
+            if abs(vrel[2]) > 0.0:
+                iV = hpz_m
+                tsolV = abs(drel[2] / vrel[2])
+                if tsolV > dtlook:
+                    tsolV = tLOS
+                dv3 = ((iV / tsolV) * (-vrel[2] / abs(vrel[2]))
+                       if tsolV != 0.0 else 0.0)
+            else:
+                iV = hpz_m - abs(drel[2])
+                tsolV = tLOS
+                if tsolV > dtlook:
+                    tsolV = tLOS
+                    iV = hpz_m
+                dv3 = (iV / tsolV) if tsolV != 0.0 else 0.0
+        elif abs(vrel[2]) > _VREL_VERT_FLOOR:
             # --- Normal case: meaningful relative vertical speed ---
             iV    = hpz_m
             tsolV = abs(drel[2] / vrel[2])
@@ -828,115 +909,22 @@ class MVP2NAT(ConflictResolution):
 
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Recovery — snap past waypoints that were overflown during the maneuver
+    # NOTE: MVP2NAT used to carry its own resumenav() + _advance_past_overflown()
+    # here. They were DEAD CODE and have been removed (2026-08-21).
+    #
+    # Release is no longer a ConflictResolution responsibility in this fork:
+    # ConflictResolution.update() (resolution.py:99-104) only calls resolve(),
+    # and the decision to hand an aircraft back to the FMS moved to the separate
+    # replaceable ResumeNavigation entity. The live copy of this exact logic is
+    # PastCPANAT.resumenav (pastcpanat.py:21), the NATBlue default; FTRNAT is the
+    # 3D alternative. The removed methods also referenced self.resopairs, which
+    # no longer exists on ConflictResolution, so they would have raised
+    # AttributeError if anything had ever called them.
+    #
+    # They are called out rather than silently dropped because they made the
+    # release question -- the one behind both the runaway dive and the retired
+    # bouncing metric -- look as though it were answered inside this file.
     # ─────────────────────────────────────────────────────────────────────────
-    def resumenav(self, conf, ownship, intruder):
-        ''' Mirror of the base implementation, with one addition: when an
-            aircraft transitions out of ASAS-active state, we walk the FMS
-            forward past any waypoints that lie behind the aircraft along
-            the current route segment. This prevents a backward turn after
-            a sustained vertical maneuver carries the aircraft past its
-            "active" waypoint while the FMS still pointed at it.
-
-            Constraint motivation: in conftest.scn every waypoint carries
-            altitude and speed constraints (granular cruise climb), so a
-            "do not skip constrained waypoints" rule would disable this fix
-            entirely. We deliberately do skip — the next waypoint's
-            constraints become active on direct() and cruise-climb
-            continuity is preserved by the FMS. '''
-        self.resopairs.update(conf.confpairs)
-
-        delpairs = set()
-        changeactive = dict()
-
-        def anglediff(a, b):
-            d = a - b
-            if d > 180:
-                return anglediff(a, b + 360)
-            elif d < -180:
-                return anglediff(a + 360, b)
-            return d
-
-        for conflict in self.resopairs:
-            idx1, idx2 = bs.traf.id2idx(conflict)
-            if idx1 < 0:
-                delpairs.add(conflict)
-                continue
-
-            if idx2 >= 0:
-                re = 6371000.
-                dist = re * np.array([np.radians(intruder.lon[idx2] - ownship.lon[idx1]) *
-                                      np.cos(0.5 * np.radians(intruder.lat[idx2] +
-                                                              ownship.lat[idx1])),
-                                      np.radians(intruder.lat[idx2] - ownship.lat[idx1])])
-
-                vrel = np.array([intruder.gseast[idx2] - ownship.gseast[idx1],
-                                 intruder.gsnorth[idx2] - ownship.gsnorth[idx1]])
-
-                past_cpa = np.dot(dist, vrel) > 0.0
-
-                rpz = np.max(conf.rpz[[idx1, idx2]])
-                hdist = np.linalg.norm(dist)
-                hor_los = hdist < rpz
-
-                is_bouncing = \
-                    abs(anglediff(ownship.trk[idx1], intruder.trk[idx2])) < 30.0 and \
-                    hdist < rpz * self.resofach
-
-            if idx2 >= 0 and (not past_cpa or hor_los or is_bouncing):
-                changeactive[idx1] = True
-            else:
-                changeactive[idx1] = changeactive.get(idx1, False)
-                delpairs.add(conflict)
-
-        for idx, active in changeactive.items():
-            self.active[idx] = active
-            if not active:
-                # Snap the FMS to a waypoint that is ahead of the aircraft
-                # along the current route segment. _advance_past_overflown
-                # walks chains of overflown waypoints; in the typical NAT case
-                # zero or one waypoints are skipped.
-                self._advance_past_overflown(idx)
-
-        self.resopairs -= delpairs
-
-    def _advance_past_overflown(self, idx):
-        ''' Find the next FMS-active waypoint, then keep advancing while it
-            lies behind the aircraft along the route segment (signed
-            along-track distance < 0). The first call mirrors the base
-            class's findact + direct sequence, so behaviour is identical
-            for aircraft that have not overflown their target. '''
-        acrte = bs.traf.ap.route[idx]
-        iwpid = acrte.findact(idx)
-        if iwpid == -1:
-            return
-        acrte.direct(idx, acrte.wpname[iwpid])
-
-        # Walk forward through any chain of overflown waypoints. Cap at the
-        # route length so a malformed route can't loop indefinitely.
-        for _ in range(acrte.nwp):
-            iact = acrte.iactwp
-            if iact < 0 or iact >= acrte.nwp - 1:
-                return  # no next waypoint to advance to
-            # Bearing of the segment leading TO the active waypoint.
-            # If no previous waypoint exists, fall back to aircraft track.
-            if iact > 0:
-                qdr_leg, _ = geo.qdrdist(
-                    acrte.wplat[iact - 1], acrte.wplon[iact - 1],
-                    acrte.wplat[iact],     acrte.wplon[iact])
-            else:
-                qdr_leg = bs.traf.trk[idx]
-            # Bearing from aircraft to the active waypoint.
-            qdr_to_wp, _ = geo.qdrdist(
-                bs.traf.lat[idx], bs.traf.lon[idx],
-                acrte.wplat[iact], acrte.wplon[iact])
-            # Signed along-track sign: if |delta| > 90 deg, the waypoint is
-            # behind us projected onto the segment direction.
-            delta = abs(((qdr_to_wp - qdr_leg + 180.0) % 360.0) - 180.0)
-            if delta > 90.0:
-                acrte.direct(idx, acrte.wpname[iact + 1])
-            else:
-                return
 
     # ─────────────────────────────────────────────────────────────────────────
     # Heading fallback (H2, Stage-C iter 1). Dead code when swfallbackhdg=False.
@@ -1292,3 +1280,123 @@ class MVP2NAT_HYBRID3_FREEZE_NOSPD(MVP2NAT_HYBRID3):
         super().__init__()
         self._hold_descend  = False    # freeze at current alt
         self._ct_spd_factor = 1.0      # no slow-down
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stock-MVP reference + cumulative ablation ladder (synthetic suite, 2026-08-21)
+#
+# WHY THE STOCK ALGORITHM IS RE-IMPLEMENTED HERE RATHER THAN RUN FROM mvp.py.
+# `RESO MVP` is not usable as a reference in this fork. bluesky/traffic/asas/
+# mvp.py:265 returns `newgscapped` -- GROUND speed -- while aporasas.py takes
+# `bs.traf.cr.tas` as TAS directly, so a stock run injects the wind component
+# into the speed channel as an error of jetstream magnitude. Comparing mvp2nat
+# against that measures the unit bug, not the algorithm. `_sw_perf_limits=False`
+# reproduces stock's independent vmin/vmax and vsmin/vsmax clips while keeping
+# the fork's TAS semantics, so the comparison is about resolution behaviour.
+# mvp.py itself is left untouched.
+#
+# The ladder exists so a behaviour change can be attributed to ONE mechanism.
+# All eight layers live at a single git SHA and can therefore run in one batch;
+# reverting the file commit-by-commit would spread them over several SHAs, make
+# them un-runnable together, and risk losing the 3b5f29ee / 2948e50c fixes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Cumulative: each layer keeps everything the previous one enabled.
+_LADDER = [
+    ("L0", []),                              # stock MVP algorithm
+    ("L1", ["_sw_perf_limits"]),             # BADA-aware coupled speed/VS cap
+    ("L2", ["_sw_erratum_floor"]),           # near-tangent geometry floor
+    ("L3", ["_sw_dh_cap"]),                  # per-tick altitude STEP cap
+    ("L4", ["_sw_symbreak"]),                # co-altitude symmetry + ceiling
+    ("L5", ["_sw_vs_cap"]),                  # commanded vertical RATE cap
+    ("L6", ["_sw_alt_anchor"]),              # cumulative bound => full guard
+    ("L7", ["_isolate_domain"]),             # per-domain channel ownership
+]
+
+_ALL_SWITCHES = ["_sw_perf_limits", "_sw_erratum_floor", "_sw_dh_cap",
+                 "_sw_symbreak", "_sw_vs_cap", "_sw_alt_anchor",
+                 "_isolate_domain"]
+
+# Domain flag sets, matching the four isolated-domain classes above.
+_DOMAINS = {
+    "VERT": dict(swresohoriz=False, swresospd=False, swresohdg=False,
+                 swresovert=True),
+    "SPD":  dict(swresohoriz=True,  swresospd=True,  swresohdg=False,
+                 swresovert=False),
+    "HDG":  dict(swresohoriz=True,  swresospd=False, swresohdg=True,
+                 swresovert=False),
+    "BOTH": dict(swresohoriz=True,  swresospd=True,  swresohdg=True,
+                 swresovert=False),
+}
+
+
+def _make_layer(name, domain_flags, enabled, doc):
+    """Build one ablation class. Generated rather than written out because the
+    8 x 4 grid is mechanical, and hand-writing 32 near-identical classes is how
+    a typo silently turns one cell of an ablation study into a different one."""
+    def __init__(self, _flags=domain_flags, _on=frozenset(enabled)):
+        MVP2NAT.__init__(self)
+        for k, v in _flags.items():
+            setattr(self, k, v)
+        for sw in _ALL_SWITCHES:
+            setattr(self, sw, sw in _on)
+        # The hybrid channels stay off in every layer: this ladder isolates the
+        # base resolver, and the hybrid controller is explicitly out of scope.
+        self.swfallbackhdg = False
+        self.swspeedcotrack = False
+        self.swaltholdcotrack = False
+    return type(name, (MVP2NAT,), {"__init__": __init__, "__doc__": doc})
+
+
+def _build_ladder():
+    out = {}
+    for dom, flags in _DOMAINS.items():
+        on = []
+        for layer, adds in _LADDER:
+            on = on + adds
+            name = "MVP2NAT_%s_%s" % (dom, layer)
+            out[name] = _make_layer(
+                name, flags, on,
+                "Ablation layer %s of the %s domain. Enabled: %s."
+                % (layer, dom, ", ".join(on) if on else "nothing (stock MVP)"))
+    return out
+
+
+globals().update(_build_ladder())
+
+
+class MVP2NAT_STOCK(MVP2NAT):
+    ''' Stock BlueSky MVP's algorithm, with this fork's TAS semantics.
+
+        Every mvp2nat mechanism is off and the domain defaults are stock's
+        (horizontal-first, vertical off), so this is the reference the ladder
+        is measured against. Identical to MVP2NAT_BOTH_L0 except for the
+        domain: stock MVP resolves in speed AND heading together and leaves
+        the vertical channel alone unless RMETHV is set. '''
+    def __init__(self):
+        super().__init__()
+        self.swresohoriz = True
+        self.swresospd   = True
+        self.swresohdg   = True
+        self.swresovert  = False
+        for sw in _ALL_SWITCHES:
+            setattr(self, sw, False)
+        self.swfallbackhdg = False
+        self.swspeedcotrack = False
+        self.swaltholdcotrack = False
+
+
+class MVP2NAT_STOCK_VERT(MVP2NAT_STOCK):
+    ''' Stock MVP's algorithm in the VERTICAL domain (stock + RMETHV ON).
+
+        This is the configuration that reproduces the reported "head-on, both
+        aircraft descend into the ground": with both aircraft level, vrel[2]
+        is exactly 0, stock's fallback hands BOTH orderings the same positive
+        dv3, and the `dv[idx1] -= dv_mvp` accumulation commands both down.
+        MVP2NAT_VERT_L4 is the same thing with the symmetry breaker added. '''
+    def __init__(self):
+        super().__init__()
+        self.swresohoriz = False
+        self.swresospd   = False
+        self.swresohdg   = False
+        self.swresovert  = True
