@@ -574,10 +574,19 @@ class MVP2NAT(ConflictResolution):
             if idx1 >-1 and idx2 > -1:
                 dv_mvp, tsolV, dabsH = self.MVP(ownship, intruder, conf, qdr, dist, tcpa, tLOS, idx1, idx2)
 
+                # PLAIN hpz, deliberately NOT hpz * resofacv. State-based
+                # detection drops a diverging pair as soon as it exceeds plain
+                # HPZ -- past that point no future time has |dalt| < HPZ. And
+                # ConflictResolution.update() only calls resolve() while
+                # confpairs is non-empty (resolution.py:103), so a trigger set
+                # at 1050 ft against a 1000 ft HPZ is evaluated on a tick that
+                # never happens: measured as exactly zero effect on all seven
+                # ladder scenarios. The last tick the pair is still in conflict
+                # is the last chance to write a hold.
                 ok = self._vert_satisfied(
                     intruder.alt[idx2] - ownship.alt[idx1],
                     intruder.vs[idx2] - ownship.vs[idx1],
-                    np.max(conf.hpz[[idx1, idx2]] * self.resofacv))
+                    np.max(conf.hpz[[idx1, idx2]]))
                 vert_ok[idx1] = vert_ok.get(idx1, True) and ok
                 if tsolV < timesolveV[idx1]:
                     timesolveV[idx1] = tsolV
