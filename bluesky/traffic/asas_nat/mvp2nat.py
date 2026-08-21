@@ -795,9 +795,33 @@ class MVP2NAT(ConflictResolution):
         # still applies the VS cap. Passing inf for max_vs turns that half off
         # too, which keeps _clamp_vertical itself untouched -- its 8 unit tests
         # pin the maths and must stay valid.
+        # Cumulative bound. _MAX_VNAV_DEV_M (4000 ft) is a runaway backstop,
+        # not a manoeuvre size: with it alone a pair needing 1050 ft of vertical
+        # separation ended up 4305 ft apart (BUG-04).
+        #
+        # The reason a threshold-triggered stop cannot do this job is worth
+        # recording. State-based detection drops a pair as soon as its VERTICAL
+        # violation window closes before its HORIZONTAL one opens. On a head-on
+        # pair splitting at 1050 fpm with CPA 560 s away, that happens at about
+        # 100 ft of separation -- and ConflictResolution.update() then stops
+        # calling resolve() (resolution.py:103) while resume-nav still holds
+        # altactive True, so the LAST command keeps being flown. Any trigger
+        # inside resolve() is evaluated on ticks that no longer happen.
+        #
+        # Bounding the command against the engagement anchor at the required
+        # separation fixes it without any lifecycle state: the stale command
+        # can only ever point one HPZ away. The pair splits, so each aircraft
+        # moving up to hpz*resofacv gives ~2x the minimum -- margin, not
+        # excess. _vert_hold still handles the complementary case, a pair whose
+        # horizontal window is ALREADY open (co-track), which stays in
+        # confpairs until it is genuinely separated.
+        max_dev = _MAX_VNAV_DEV_M
+        if self._sw_vert_hold and len(conf.hpz):
+            max_dev = min(max_dev, float(np.max(conf.hpz)) * self.resofacv)
         vscapped, alt = self._clamp_vertical(
             vscapped, alt, anchor,
-            max_vs=_MAX_RESO_VS if self._sw_vs_cap else np.inf)
+            max_vs=_MAX_RESO_VS if self._sw_vs_cap else np.inf,
+            max_dev=max_dev)
 
         # Vertical hold (BUG-04): an aircraft whose every conflict is
         # vertically satisfied stops manoeuvring and holds the level it

@@ -499,3 +499,37 @@ class TestVerticalHold:
         cr._vert_hold.clear()
         cr._update_vert_hold(["AC1"], {"AC1": 35000.0 * FT})
         assert cr._vert_hold == {}
+
+
+class TestCumulativeBoundIsTheRequiredSeparation:
+    """The stale-command bound must be the geometry, not the runaway backstop.
+
+    _MAX_VNAV_DEV_M (4000 ft) exists to stop a runaway; it is far too loose to
+    size a manoeuvre. These pin that _clamp_vertical is capable of the tighter
+    bound and that the loose one really is loose -- the wiring in resolve() is
+    covered end-to-end by the synthetic suite, which is where the 4305 ft was
+    measured in the first place.
+    """
+
+    def test_the_backstop_alone_permits_a_four_times_overshoot(self, traffic_):
+        anchor = np.array([35000.0 * FT])
+        # A stale command pointing _MAX_DH_M away, clamped only by the backstop.
+        _, alt = MVP2NAT._clamp_vertical(np.array([0.0]),
+                                         np.array([28000.0 * FT]), anchor)
+        assert (anchor[0] - alt[0]) / FT > 3900.0
+
+    def test_the_required_separation_bound_holds_it_to_one_hpz(self, traffic_):
+        anchor = np.array([35000.0 * FT])
+        hpz_req = 1000.0 * FT * 1.05
+        _, alt = MVP2NAT._clamp_vertical(np.array([0.0]),
+                                         np.array([28000.0 * FT]), anchor,
+                                         max_dev=hpz_req)
+        assert np.isclose((anchor[0] - alt[0]) / FT, 1050.0, atol=1.0)
+
+    def test_the_bound_is_symmetric(self, traffic_):
+        anchor = np.array([35000.0 * FT])
+        hpz_req = 1000.0 * FT * 1.05
+        _, alt = MVP2NAT._clamp_vertical(np.array([0.0]),
+                                         np.array([42000.0 * FT]), anchor,
+                                         max_dev=hpz_req)
+        assert np.isclose((alt[0] - anchor[0]) / FT, 1050.0, atol=1.0)
