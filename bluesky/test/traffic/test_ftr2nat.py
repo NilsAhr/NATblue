@@ -63,6 +63,47 @@ class _Conf:
         self.dtlookahead = np.array([dtlook, dtlook])
 
 
+class _Pair:
+    """Two aircraft, enough for a whole `_pair_clears` call.
+
+    `_StubTraf` is single-aircraft and covers the helpers; this covers the
+    predicate end to end, which is what the flag-dependence guard needs. Both
+    aircraft are parked 2000 ft BELOW their commanded levels -- the state a
+    vertical resolver leaves behind, and the one in which the intent
+    substitutions used to switch on and off with `cr.active`.
+
+    It doubles as ownship and intruder, as `bs.traf` does.
+    """
+
+    class _Ap:
+        def __init__(self, alt, vs, trk, tas):
+            self.alt = np.array(alt, dtype=float)
+            self.vs = np.array(vs, dtype=float)
+            self.trk = np.array(trk, dtype=float)
+            self.tas = np.array(tas, dtype=float)
+
+    class _Cr:
+        def __init__(self, engaged):
+            self.active = np.array([engaged, engaged], dtype=bool)
+            self.resofach = 1.05
+            self.resofacv = 1.05
+
+    def __init__(self, engaged=True, sep_nm=4.0, dalt_ft=900.0):
+        # Head-on, closing, and inside both zones: a pair the resolver owns.
+        self.lat = np.array([50.0, 50.0])
+        self.lon = np.array([-30.0, -30.0 + sep_nm / 60.0 / np.cos(np.radians(50.0))])
+        self.alt = np.array([10668.0, 10668.0 + dalt_ft * FT])
+        self.vs = np.array([0.0, 0.0])          # held level by the resolver
+        self.gseast = np.array([200.0, -200.0])
+        self.gsnorth = np.array([0.0, 0.0])
+        self.windeast = np.array([0.0, 0.0])
+        self.windnorth = np.array([0.0, 0.0])
+        # Both intend to climb 2000 ft back to their own cruise levels.
+        self.ap = self._Ap(alt=self.alt + 2000.0 * FT, vs=[7.62, 7.62],
+                           trk=[90.0, 270.0], tas=[200.0, 200.0])
+        self.cr = self._Cr(engaged)
+
+
 # ---------------------------------------------------------------------------
 # DEFECT 1 — the ASSUMED path recorded a RESOLUTION rate as the intruder's
 # intent, fabricating a vertical escape.
@@ -385,15 +426,41 @@ class TestRampHorizon:
 
     def test_capture_time_from_the_offset_and_the_rate(self):
         # 1050 ft to recover at 1500 fpm is 42 s.
-        t = FTR2NAT._ramp_horizon(alt=10668.0, apalt=10668.0 + 1050.0 * FT,
-                                  vs_desired=7.62, dtlook=DTLOOK)
+        t = FTR2NAT._capture_time(alt=10668.0, target_alt=10668.0 + 1050.0 * FT,
+                                  vs=7.62)
         assert t == pytest.approx(42.0, abs=0.5)
 
-    def test_a_level_aircraft_gets_the_full_lookahead(self):
-        assert FTR2NAT._ramp_horizon(10668.0, 10668.0, 0.0, DTLOOK) == DTLOOK
+    def test_an_aircraft_already_at_its_level_has_no_transient(self):
+        # Zero, not the full lookahead. There is no ramp to bound, and the
+        # settled case -- current level == commanded level -- is exact alone.
+        assert FTR2NAT._capture_time(10668.0, 10668.0, 0.0) == 0.0
+
+    def test_the_bound_is_continuous_across_the_capture_dead_band(self):
+        """The defect that made the release chatter.
+
+        `desired_vs` returns 0 inside its altitude-capture dead band. The old
+        `_ramp_horizon` mapped that to the FULL lookahead while a metre outside
+        the band mapped to a fraction of a second, so two adjacent states gave
+        answers three orders of magnitude apart -- measured on S05 as `tl_now`
+        jumping 0.5 -> 500.0 s across a release tick.
+        """
+        just_outside = FTR2NAT._capture_time(10668.0, 10668.0 + 3.0, 7.62)
+        just_inside = FTR2NAT._capture_time(10668.0, 10668.0, 0.0)
+        assert just_outside < 1.0
+        assert abs(just_outside - just_inside) < 1.0
+
+    def test_the_pair_bound_follows_the_LATER_of_the_two_aircraft(self):
+        """An intruder still climbing after the ownship has levelled off was
+        invisible: the horizon was the ownship's capture time only, and the
+        settled case holds the intruder at rest."""
+        own = FTR2NAT._capture_time(10668.0, 10668.0, 0.0)            # level
+        intr = FTR2NAT._capture_time(10668.0, 10668.0 + 1050.0 * FT, 7.62)
+        assert min(DTLOOK, max(own, intr)) == pytest.approx(42.0, abs=0.5)
 
     def test_never_longer_than_the_lookahead(self):
-        assert FTR2NAT._ramp_horizon(0.0, 1e6, 1.0, DTLOOK) == DTLOOK
+        # The cap lives at the call site, since the bound is now a max over
+        # both aircraft; the helper itself is unbounded.
+        assert min(DTLOOK, FTR2NAT._capture_time(0.0, 1e6, 1.0)) == DTLOOK
 
     def test_a_convergence_after_capture_no_longer_holds(self):
         # Pair 2100 ft apart, reverting toward each other at 3000 fpm, so they
@@ -442,8 +509,16 @@ class TestIntruderUnderAsasIsNotIntent:
         assert raw is True         # the phantom convergence holds it
         assert intent is False     # both climbing back: no convergence
 
-    def test_asas_owns_is_false_without_a_live_sim(self):
-        assert FTR2NAT._asas_owns(0) in (True, False)
+    def test_the_intruder_rate_comes_from_the_autopilot_not_the_resolver(self):
+        """`intruder.vs` under a resolver is the resolver's command. This used
+        to be conditioned on `cr.active`; it no longer is (see
+        TestThePredicateDoesNotDependOnWhoIsFlying)."""
+        # _Pair holds both aircraft level 2000 ft below their commanded levels,
+        # which is what a vertical resolver leaves behind.
+        traf = _Pair()
+        assert traf.vs[1] == 0.0
+        assert _bare(FTR2NAT)._intruder_now_vs(traf, 1) == pytest.approx(7.62)
+        assert _bare(FTR2NAT_FIX)._intruder_now_vs(traf, 1) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -464,28 +539,29 @@ class TestSettledAltitudeAndSettledRateMustAgree:
     """
 
     def test_the_fix_class_pairs_the_current_altitude_with_the_current_rate(self):
+        """FTR2NAT_FIX settles at the intruder's CURRENT altitude, so the rate
+        that carries it away from there is the current one.
+
+        This assertion previously passed for the wrong reason: the intent
+        versions were defined a SECOND time inside FTR2NAT_FIX's own class body
+        and silently shadowed these, and the test only passed because the
+        shadowing versions read `cr.active`, which is absent in a bare object.
+        TestNoMethodIsDefinedTwice is what actually guards that now.
+        """
         o = _bare(FTR2NAT_FIX)
         traf = _StubTraf()
-        # FTR2NAT_FIX settles at the intruder's CURRENT altitude, so the rate
-        # that carries it away from there is the current one. Unchanged.
         assert o._intruder_settled_alt(traf, 1, 35000.0 * FT) == 35000.0 * FT
         assert o._intruder_settled_vs(traf, 1, 7.62) == 7.62
 
     def test_a_destination_altitude_is_paired_with_a_zero_rate(self):
         o = _bare(FTR2NAT)
-        traf = _StubTraf()
-        o._asas_owns = lambda idx: True
-        # The altitude is now a DESTINATION, so the rate that gets it there
-        # must not also carry it beyond.
+        traf = _Pair()
+        # The altitude is a DESTINATION -- the intruder's own commanded level,
+        # not where the resolver is holding it -- so the rate that gets it
+        # there must not also carry it beyond.
+        assert o._intruder_settled_alt(traf, 1, traf.alt[1]) == traf.ap.alt[1]
+        assert o._intruder_settled_alt(traf, 1, traf.alt[1]) != traf.alt[1]
         assert o._intruder_settled_vs(traf, 1, 7.62) == 0.0
-
-    def test_an_unheld_intruder_keeps_its_own_rate(self):
-        o = _bare(FTR2NAT)
-        traf = _StubTraf()
-        o._asas_owns = lambda idx: False
-        # Nothing was substituted, so nothing may be zeroed: an intruder flying
-        # its own plan really is at its current level moving at its own rate.
-        assert o._intruder_settled_vs(traf, 1, 7.62) == 7.62
 
     def test_the_measured_r01_geometry_releases_once_the_pair_agrees(self):
         o = _bare(FTR2NAT)
@@ -498,3 +574,119 @@ class TestSettledAltitudeAndSettledRateMustAgree:
         clear = o._revert_conflict(*args, -2551.0 * FT, 0.0)
         assert held is True      # arrives at its level, then flies on through
         assert clear is False    # arrives at its level and stays there
+
+
+# ---------------------------------------------------------------------------
+# The two guards that would have caught the defects this file documents.
+# ---------------------------------------------------------------------------
+class TestNoMethodIsDefinedTwice:
+    """`FTR2NAT_FIX` defined `_intruder_settled_alt` and `_intruder_settled_vs`
+    twice in its own class body. Python keeps the later definition, so the
+    plain audit-fixes-only versions were dead code and the ablation CONTROL
+    silently carried the intent substitutions.
+
+    It happened because a commit meant to change FTR2NAT appended the overrides
+    to the wrong class body, and a later commit anchored on the misplaced code
+    and inherited the mistake. Nothing failed: the shadowing versions read
+    `cr.active`, which is absent in a bare test object, so the control tests
+    passed on the fallback branch.
+    """
+
+    def test_no_class_in_ftr2nat_shadows_its_own_method(self):
+        import ast
+        import inspect
+        from bluesky.traffic.asas import ftr2nat as mod
+
+        tree = ast.parse(inspect.getsource(mod))
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            names = [m.name for m in node.body
+                     if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            dupes = sorted({n for n in names if names.count(n) > 1})
+            assert not dupes, f"{node.name} defines {dupes} more than once"
+
+
+class TestThePredicateDoesNotDependOnWhoIsFlying:
+    """The release criterion answers "if both aircraft are handed back NOW,
+    does the conflict re-form?".
+
+    That is a question about the post-release world, so it cannot depend on
+    `bs.traf.cr.active` -- which the release itself clears. It did, in three
+    places, and the result was a period-2 limit cycle: release -> flag clears
+    -> "hold" -> re-engage -> flag sets -> "clear" -> release. Measured on S05
+    (FTR2NAT_TRACE, 2026-08-24) as `dvs_settled` flipping 0 -> 1.524 across a
+    single release tick.
+    """
+
+    def test_no_method_but_resumenav_touches_cr_active(self):
+        """`resumenav` WRITES the flag -- that is its job. Nothing else may
+        read it. Stated on the source so a reintroduction cannot pass by
+        happening to agree on the geometry the behavioural test uses."""
+        import ast
+        import inspect
+        from bluesky.traffic.asas import ftr2nat as mod
+
+        tree = ast.parse(inspect.getsource(mod))
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name == "resumenav":
+                continue
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Attribute) and sub.attr == "active"
+                        and isinstance(sub.value, ast.Attribute)
+                        and sub.value.attr == "cr"):
+                    offenders.append(node.name)
+        assert not offenders, f"{sorted(set(offenders))} read cr.active"
+
+    # Several geometries, so a single case that happens to agree cannot carry
+    # the guard. These give both answers: the first two hold, the third clears.
+    GEOMETRIES = [
+        {},                                 # 4 NM / 900 ft, closing
+        {"sep_nm": 40.0},                   # far apart, still converging
+        {"dalt_ft": 4000.0},                # vertically clear at rest
+    ]
+
+    @pytest.mark.parametrize("geometry", GEOMETRIES)
+    def test_the_answer_is_identical_whether_or_not_asas_is_engaged(
+            self, geometry, monkeypatch):
+        """The behavioural half: same geometry, both settings of the flag.
+
+        Both aircraft are parked off their commanded levels, which is the state
+        a vertical resolver leaves behind and the one where the substitutions
+        used to switch on and off.
+        """
+        import bluesky as bs
+
+        conf = _Conf()
+        answers = []
+        for engaged in (True, False):
+            traf = _Pair(engaged=engaged, **geometry)
+            monkeypatch.setattr(bs, "traf", traf, raising=False)
+            o = _bare(FTR2NAT)
+            o._rel_fach = o._rel_facv = None      # follow cr.resofach/resofacv
+            answers.append(o._pair_clears(conf, traf, traf, 0, 1, ("A", "B")))
+        assert answers[0] == answers[1]
+
+    def test_the_geometries_are_not_all_the_same_answer(self, monkeypatch):
+        """Guard on the guard: if every case held (or every case cleared) the
+        parametrised test above would pass on a constant."""
+        import bluesky as bs
+
+        conf = _Conf()
+        seen = set()
+        for geometry in self.GEOMETRIES:
+            traf = _Pair(**geometry)
+            monkeypatch.setattr(bs, "traf", traf, raising=False)
+            o = _bare(FTR2NAT)
+            o._rel_fach = o._rel_facv = None
+            seen.add(o._pair_clears(conf, traf, traf, 0, 1, ("A", "B")))
+        assert seen == {True, False}
+
+    def test_the_stub_would_expose_a_flag_read(self, monkeypatch):
+        """Guard on the guard: the two _Pair states must actually differ in
+        `cr.active`, or the test above passes vacuously."""
+        assert list(_Pair(engaged=True).cr.active) != \
+            list(_Pair(engaged=False).cr.active)

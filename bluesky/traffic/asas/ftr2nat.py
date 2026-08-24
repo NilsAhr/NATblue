@@ -78,6 +78,16 @@ class FTR2NAT_FIX(FTRNAT):
                               intruder.gsnorth[idx2],
                               self.desired_vs(intruder, idx2))
 
+    # The three hooks below are what criterion 1 believes about the intruder.
+    # FTRNAT's answers are kept here -- current state, taken at face value --
+    # so this class stays the audit-fixes-only control; FTR2NAT overrides all
+    # three together.
+
+    def _intruder_now_vs(self, intruder, idx2):
+        ''' The intruder's vertical rate in the "now" case. FTRNAT's: whatever
+            it happens to be flying this instant. '''
+        return intruder.vs[idx2]
+
     def _intruder_settled_alt(self, intruder, idx2, alt_intr):
         ''' The level the intruder ends up at. Its CURRENT one, here. '''
         return alt_intr
@@ -134,57 +144,47 @@ class FTR2NAT_FIX(FTRNAT):
         # it is what detection sees during that transient.
         vrel_now = vnow - np.array([ownship.gseast[idx1], ownship.gsnorth[idx1]])
 
-        # How long the ownship would still be climbing/descending after it
-        # reverts, before it captures its commanded level. Past that moment the
-        # "now" rate is fiction -- see _ramp_horizon.
-        t_cap = self._ramp_horizon(alt_own, apalt_own, vsown, dtlook)
-
-        # Criterion 1: the intruder holds its current state while the ownship
-        # reverts and settles at its commanded level.
-        #
-        # ...except that a rate the RESOLVER is commanding is not a statement
-        # about what the intruder will do. This is the same defect as the
-        # ASSUMED-intent one, one criterion further up: FTRNAT feeds
-        # `intruder.vs` in raw, so when both aircraft are parked off their
-        # route levels by a vertical resolver, criterion 1 models the ownship
-        # climbing back while the intruder stays put -- a convergence that
-        # never happens, because the intruder climbs back too.
-        #
-        # Measured on R01 under MVP2NAT_VERT: both aircraft frozen ~1600 and
-        # ~2000 ft below their routes, 2100 ft apart, criterion 2 clear and
-        # criterion 1 holding, so the pair was never released in 4002 s.
-        vs_intr = (self.desired_vs(intruder, idx2)
-                   if self._asas_owns(idx2) else intruder.vs[idx2])
-        # Where the intruder ENDS UP -- again, not where the resolver is
-        # currently holding it (see _intruder_settled_alt).
+        # Criterion 1: the intruder carries on as it is while the ownship
+        # reverts and settles at its commanded level. What "as it is" means is
+        # the class's business, not this method's -- see the three hooks.
+        vs_intr = self._intruder_now_vs(intruder, idx2)
         alt_intr_end = self._intruder_settled_alt(intruder, idx2, alt_intr)
-        # ...and the rate that goes WITH that altitude. An altitude the
-        # intruder is heading for, paired with the rate it is using to get
-        # there, models it arriving and then carrying on through -- see
-        # _intruder_settled_vs.
+        # The rate must go WITH that altitude. An altitude the intruder is
+        # heading for, paired with the rate that flies it there, models the
+        # aircraft arriving and then carrying on through it.
         vs_intr_end = self._intruder_settled_vs(intruder, idx2, vs_intr)
+
+        # How long the "now" rates stay meaningful: until BOTH aircraft have
+        # reached the level they are heading for. Bounding on the OWNSHIP's
+        # capture time alone left a gap -- an intruder still climbing after the
+        # ownship levelled off was invisible to the now case and absent from
+        # the settled case, which holds it at rest.
+        t_settle = min(float(dtlook),
+                       max(self._capture_time(alt_own, apalt_own, vsown),
+                           self._capture_time(alt_intr, alt_intr_end, vs_intr)))
+
         clear = not self._revert_conflict(
             dist, vnow - vown, vrel_now, rpz, hpz, dtlook,
             dalt, vs_intr - vsown,
-            alt_intr_end - apalt_own, vs_intr_end, t_cap)
+            alt_intr_end - apalt_own, vs_intr_end, t_settle)
 
         # Criterion 2: the intruder reverts to its desired state too.
+        #
+        # There used to be a branch here reading the intruder's LIVE intent
+        # whenever the resolver owned it, because the ASSUMED record is taken
+        # at first detection and never refreshed -- it says "level" while a
+        # resolver-parked aircraft now intends 1500 fpm back up. That branch is
+        # gone: it made the criterion depend on `cr.active`, which the release
+        # itself clears, so the predicate answered differently on the tick
+        # after a release than on the tick before (see the class docstring).
+        # The stale-record problem is handled where it belongs instead -- the
+        # settled terms come from `alt_intr_end` at rest, and under FTR2NAT
+        # that is the intruder's own commanded level however it is being flown
+        # right now. Only the HORIZONTAL revert velocity still comes from the
+        # snapshot, which is what ASSUMED means.
         if clear and self.intent != 'OFF':
             vrevert = vsrevert = None
-            if self.intent == 'ASSUMED' and self._asas_owns(idx2):
-                # The ASSUMED record is taken on the tick the pair is first
-                # detected and never refreshed. That is fine for an intruder
-                # flying its own plan, but useless for one the resolver has
-                # since taken over and parked off its route level: the record
-                # says "level" while the aircraft now intends 1500 fpm back up.
-                # Measured on R01: criteria 1 cleared, criterion 2 held on a
-                # stale record, and the pair was never released in 4002 s.
-                # Where ASAS owns the intruder, read its live intent instead.
-                vrevert = self.desired_spd_trk(intruder, idx2)
-                vsrevert = self.desired_vs(intruder, idx2)
-                dalt_settled = alt_intr_end - apalt_own
-                dvs_settled = 0.0
-            elif self.intent == 'ASSUMED':
+            if self.intent == 'ASSUMED':
                 assumed = self.assumed.get(conflict)
                 if assumed is None:
                     # FTRNAT drops criterion 2 for the pair's whole lifetime if
@@ -205,7 +205,7 @@ class FTR2NAT_FIX(FTRNAT):
                 clear = not self._revert_conflict(
                     dist, vrevert - vown, vrel_now, rpz, hpz, dtlook,
                     dalt, vsrevert - vsown,
-                    dalt_settled, dvs_settled, t_cap)
+                    dalt_settled, dvs_settled, t_settle)
         return clear
 
     def _release_zones(self, conf, idx1, idx2):
@@ -214,21 +214,36 @@ class FTR2NAT_FIX(FTRNAT):
                 np.max(conf.hpz[[idx1, idx2]]))
 
     @staticmethod
-    def _ramp_horizon(alt, apalt, vs_desired, dtlook):
-        ''' How long the reverted vertical ramp actually lasts, in seconds.
+    def _capture_time(alt, target_alt, vs):
+        ''' Seconds until an aircraft at `alt`, moving at `vs`, reaches
+            `target_alt`. Zero when it is already there.
 
-            revert_conflict brackets the ramp-then-hold profile by ORing a
+            `revert_conflict` brackets the ramp-then-hold profile by ORing a
             "now" case (current levels closing at the current rate) with a
-            "settled" case. The now case extrapolates that rate FOREVER, which
-            is what the bracket is for -- but it means any transient
-            convergence during level capture holds the pair indefinitely.
-            Bounding the now case by the capture time is the missing half of
-            the bracket: a predicted conflict that only happens AFTER the
-            aircraft has levelled off is not a conflict.
+            "settled" case at rest. The now case extrapolates its rate for
+            ever, which is what the bracket is for -- but it means any
+            transient convergence during level capture holds the pair
+            indefinitely. Bounding it by the time the transient actually lasts
+            is the missing half: a predicted conflict that only happens after
+            everyone has levelled off is not a conflict.
+
+            THE ZERO CASE IS THE POINT. The previous version returned the full
+            lookahead for an aircraft already at its level, on the reasoning
+            that a level aircraft's rate is valid for ever. True, but it made
+            the bound DISCONTINUOUS: `desired_vs` returns 0 inside its
+            altitude-capture dead band, so a metre outside the band the horizon
+            was ~0.4 s and a metre inside it was 500 s -- three orders of
+            magnitude across adjacent states, which is one of the two things
+            that made the release chatter (FTR2NAT_TRACE on S05, 2026-08-24:
+            `tl_now` 0.5 -> 500.0 across a release tick).
+
+            Returning zero is also the honest answer. If nobody is transiting
+            there is no transient to cover, and the settled case -- where
+            current levels equal commanded levels -- is exact on its own.
         '''
-        if abs(vs_desired) < 1e-6:
-            return dtlook
-        return min(float(dtlook), abs(apalt - alt) / abs(vs_desired))
+        if abs(vs) < 1e-6:
+            return 0.0
+        return abs(float(target_alt) - float(alt)) / abs(float(vs))
 
     def _revert_conflict(self, dist, vrel_revert, vrel_now, rpz, hpz, dtlook,
                          dalt_now, dvs_now, dalt_settled, dvs_settled,
@@ -302,61 +317,6 @@ class FTR2NAT_FIX(FTRNAT):
             self.assumed.pop(conflict, None)
             self._forget(frozenset(conflict))
 
-    def _intruder_settled_alt(self, intruder, idx2, alt_intr):
-        ''' Where the intruder ENDS UP once everyone has been released.
-
-            FTRNAT uses its CURRENT altitude, but under a vertical resolver
-            that is a held value, not a destination. Measured on R01: the
-            intruder was frozen at 36069 ft while its own route commanded
-            38081 ft, so the settled gap read 538 ft against the ownship's
-            35531 ft -- inside HPZ, so the pair was held for ever. The true
-            settled gap was 2550 ft, comfortably clear.
-
-            Only substituted while ASAS actually owns the intruder; otherwise
-            its current altitude IS where it is going.
-        '''
-        if self._asas_owns(idx2):
-            try:
-                return float(intruder.ap.alt[idx2])
-            except Exception:
-                return alt_intr
-        return alt_intr
-
-    def _intruder_settled_vs(self, intruder, idx2, vs_intr):
-        ''' Zero whenever `_intruder_settled_alt` returned a DESTINATION.
-
-            The fifth instance of "a resolver-held state is not intent", and
-            one this class introduced itself. `_intruder_settled_alt`
-            substitutes the intruder's route level for the level the resolver
-            is holding it at -- correctly -- but the rate stayed `desired_vs`,
-            the rate that flies it there. The settled case then reads "the
-            intruder is at its route level AND still climbing at 1500 fpm",
-            which is a contradiction: it models the aircraft arriving and
-            continuing straight through.
-
-            Measured on R01 under MVP2NAT_VERT (FTR2NAT_TRACE, 2026-08-24).
-            Criterion 1's settled branch held the pair on 98.1 % of ticks in
-            the (VC02, VC01) direction and 2.5 % in the other -- so the pair
-            was never released in 4002 s while the horizontal domains let go
-            at 272 s. The settled gap was 2551 ft against a 1050 ft zone, with
-            a settled rate of 6.26 m/s closing it in a predicted 84 s.
-        '''
-        if self._asas_owns(idx2):
-            return 0.0
-        return vs_intr
-
-    @staticmethod
-    def _asas_owns(idx):
-        ''' Is the resolver currently commanding this aircraft?
-
-            If so its instantaneous state is a RESOLUTION, not intent, and must
-            not be extrapolated as a prediction of future behaviour.
-        '''
-        try:
-            act = bs.traf.cr.active
-            return bool(0 <= idx < len(act) and act[idx])
-        except Exception:
-            return False
 
     @staticmethod
     def _resnav_dt():
@@ -401,7 +361,75 @@ class FTR2NAT(FTR2NAT_FIX):
            re-engagements. Holding when EITHER the current or the reverted
            horizontal velocity conflicts is the honest reading of "the release
            must check both dimensions".
+
+        4. THE PREDICATE IS A FUNCTION OF THE GEOMETRY, NOT OF THE CONTROL
+           STATE. This class used to ask `bs.traf.cr.active` in three places,
+           to decide whether an aircraft's current vertical state was its own
+           or the resolver's. That flag is cleared BY THE RELEASE, so the
+           criterion answered differently on the tick after a release than on
+           the tick before: release -> flag clears -> "hold" -> re-engage ->
+           flag sets -> "clear" -> release. A period-2 limit cycle in the
+           release rule, the same shape as the one the vertical resolver had.
+           Measured on S05 (FTR2NAT_TRACE, 2026-08-24): `dvs_settled` flipping
+           0 -> 1.524 across a single release tick, and 12 of the 20 ticks with
+           the flag off holding the pair.
+
+           The criterion asks "if both aircraft are handed back NOW, does the
+           conflict re-form?". That is a question about the post-release world,
+           which does not depend on who is flying the aircraft this instant --
+           so the answer must not either. The three hooks below therefore
+           model the intruder the same way whatever `cr.active` says: it is
+           going to its own commanded level, and once there it stays.
+
+           Every remaining input is either a physical state (`alt`, ground
+           velocity) or an autopilot target the resolver does not write
+           (`ap.alt`, `ap.vs`, `ap.trk`, `ap.tas`), so the predicate is now a
+           pure function of geometry and flight plans.
+
+           SEMANTIC NOTE. Under `FTRINTENT ASSUMED` this class takes the
+           intruder's HORIZONTAL revert velocity from the first-detection
+           snapshot -- true ASSUMED, unchanged -- and its VERTICAL destination
+           from the aircraft's own commanded level. FTRNAT already reads
+           `intruder.ap.alt` in its DECLARED branch and `_intruder_settled_alt`
+           has read it since the intent fixes; what changes here is that it is
+           consistent instead of conditional. Record that when reporting an
+           ASSUMED arm.
     '''
+
+    def _intruder_now_vs(self, intruder, idx2):
+        ''' Not `intruder.vs`: under a resolver that is the resolver's command,
+            and criterion 1 would model the ownship climbing back while the
+            intruder stays put -- a convergence that never happens, because the
+            intruder climbs back too. `desired_vs` reads the autopilot, so it
+            is the same answer whether or not ASAS is currently in charge. '''
+        return self.desired_vs(intruder, idx2)
+
+    def _intruder_settled_alt(self, intruder, idx2, alt_intr):
+        ''' Where the intruder ENDS UP: its own commanded level.
+
+            Its CURRENT level is where the resolver happens to be holding it.
+            Measured on R01: frozen at 36069 ft while its route commanded
+            38081 ft, so the settled gap read 538 ft against the ownship's
+            35531 ft -- inside HPZ, and the pair was held for ever. The true
+            settled gap was 2550 ft, comfortably clear.
+        '''
+        try:
+            return float(intruder.ap.alt[idx2])
+        except Exception:
+            return alt_intr
+
+    def _intruder_settled_vs(self, intruder, idx2, vs_intr):
+        ''' Zero: `_intruder_settled_alt` returned a DESTINATION, and an
+            aircraft that has arrived is not still climbing.
+
+            Pairing a destination with the rate that flies it there models the
+            aircraft arriving and continuing straight through. Measured on R01
+            under MVP2NAT_VERT: criterion 1's settled branch held the pair on
+            98.1 % of ticks in one direction, on a settled gap of 2551 ft
+            against a 1050 ft zone with a settled rate of 6.26 m/s closing it
+            in a predicted 84 s -- for ever.
+        '''
+        return 0.0
 
     def __init__(self):
         super().__init__()
