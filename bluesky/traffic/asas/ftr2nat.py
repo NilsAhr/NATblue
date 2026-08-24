@@ -113,11 +113,15 @@ class FTR2NAT_FIX(FTRNAT):
         vown = self.desired_spd_trk(ownship, idx1)
         vsown = self.desired_vs(ownship, idx1)
         vnow = np.array([intruder.gseast[idx2], intruder.gsnorth[idx2]])
+        # The CURRENT relative velocity -- both sides actual. This is what the
+        # aircraft is flying while it is still turning back onto its route, and
+        # it is what detection sees during that transient.
+        vrel_now = vnow - np.array([ownship.gseast[idx1], ownship.gsnorth[idx1]])
 
         # Criterion 1: the intruder holds its current state while the ownship
         # reverts and settles at its commanded level.
         clear = not self._revert_conflict(
-            dist, vnow - vown, vnow - vnow, rpz, hpz, dtlook,
+            dist, vnow - vown, vrel_now, rpz, hpz, dtlook,
             dalt, intruder.vs[idx2] - vsown,
             alt_intr - apalt_own, intruder.vs[idx2])
 
@@ -143,7 +147,7 @@ class FTR2NAT_FIX(FTRNAT):
                 dvs_settled = 0.0
             if vrevert is not None:
                 clear = not self._revert_conflict(
-                    dist, vrevert - vown, vnow - vown, rpz, hpz, dtlook,
+                    dist, vrevert - vown, vrel_now, rpz, hpz, dtlook,
                     dalt, vsrevert - vsown,
                     dalt_settled, dvs_settled)
         return clear
@@ -184,7 +188,7 @@ class FTR2NAT_FIX(FTRNAT):
 
         delpairs = set()
         changeactive = dict()
-        dt = getattr(bs.sim, 'simdt', 1.0) or 1.0
+        dt = self._resnav_dt()
 
         # First pass: the per-direction predicate, collected by unordered pair.
         clear_by_pair = {}
@@ -223,6 +227,20 @@ class FTR2NAT_FIX(FTRNAT):
         for conflict in delpairs:
             self.assumed.pop(conflict, None)
             self._forget(frozenset(conflict))
+
+    @staticmethod
+    def _resnav_dt():
+        ''' Seconds of simulated time between two resumenav calls.
+
+            NOT bs.sim.simdt. resumenav is driven by traffic.py's `asastimer`
+            (traffic.py:82,407), so it runs once per ASAS interval -- 1.0 s by
+            default -- while simdt is the integration step, 0.05 s here. Using
+            simdt made a 15 s dwell into a 300 s one, a factor of 20.
+        '''
+        dt = getattr(bs.settings, 'asas_dt', None)
+        if not dt:
+            dt = getattr(bs.sim, 'simdt', 1.0)
+        return float(dt) or 1.0
 
     def _forget(self, key):
         ''' Drop any per-pair release state. Nothing to drop here. '''

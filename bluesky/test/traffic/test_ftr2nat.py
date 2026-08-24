@@ -300,3 +300,72 @@ class TestRegistration:
     def test_default_resume_nav_is_still_pastcpanat(self, traffic_):
         from bluesky.traffic.asas import ResumeNavigation
         assert ResumeNavigation.select_default().__name__ == 'PastCPANAT'
+
+
+# ---------------------------------------------------------------------------
+# Two implementation bugs the first in-sim run exposed. Both held R01 -- the
+# release discriminator -- engaged for its entire 4002 s.
+# ---------------------------------------------------------------------------
+class TestZeroRelativeVelocityIsNeverTheCurrentState:
+    """The horizontal bracket was handed a ZERO relative velocity.
+
+    The first version passed `vnow - vnow` where it meant "intruder actual
+    minus ownship actual". With zero relative motion `conflict_predicted`
+    floors dv2 at 1e-6, so vabs is 1e-3 and the half-chord
+    sqrt(R2 - dcpa2)/vabs is enormous: for any pair INSIDE rpz the horizontal
+    window becomes effectively infinite and overlaps any vertical window at
+    all. The pair is then held for ever. Measured on R01: engaged 4002 s of
+    4002, with the conflict itself over since t=220.
+    """
+
+    def test_zero_vrel_inside_rpz_reports_an_endless_conflict(self):
+        inside = [4.0 * 1852.0, 0.0]      # 4 NM apart, inside RPZ = 5 NM
+        # Vertically converging at 3000 fpm from 2100 ft -- a real but future
+        # window, which a sane horizontal term would not overlap.
+        assert FTRNAT.conflict_predicted(
+            np.asarray(inside, float), np.asarray([0.0, 0.0], float),
+            2100.0 * FT, -15.24, RPZ, HPZ, DTLOOK) is True
+
+    def test_the_real_relative_velocity_does_not(self):
+        # Same geometry, but with the pair's actual separating velocity the
+        # horizontal window is BOUNDED and has already closed, so the future
+        # vertical window cannot overlap it.
+        inside = [4.0 * 1852.0, 0.0]
+        assert FTRNAT.conflict_predicted(
+            np.asarray(inside, float), np.asarray([200.0, 0.0], float),
+            2100.0 * FT, -15.24, RPZ, HPZ, DTLOOK) is False
+
+    def test_zero_vrel_holds_even_a_far_future_vertical_window(self):
+        # The signature of the bug: with an unbounded horizontal window even a
+        # vertical convergence 5 minutes out reads as a conflict, so the pair
+        # can never be released while it is inside rpz.
+        inside = [4.0 * 1852.0, 0.0]
+        assert FTRNAT.conflict_predicted(
+            np.asarray(inside, float), np.asarray([0.0, 0.0], float),
+            2100.0 * FT, -2.0, RPZ, HPZ, DTLOOK) is True
+        assert FTRNAT.conflict_predicted(
+            np.asarray(inside, float), np.asarray([200.0, 0.0], float),
+            2100.0 * FT, -2.0, RPZ, HPZ, DTLOOK) is False
+
+
+class TestDwellUsesTheResumenavInterval:
+    """The dwell accumulated `bs.sim.simdt`, but resumenav runs at the ASAS rate.
+
+    traffic.py drives it from `asastimer` (traffic.py:82,407), so it is called
+    once per ASAS interval -- 1.0 s by default -- while simdt is the
+    integration step, 0.05 s in this fork. A 15 s dwell became a 300 s one.
+    """
+
+    def test_the_interval_is_the_asas_rate_not_the_integration_step(self):
+        import bluesky as bs
+        dt = FTR2NAT._resnav_dt()
+        assert dt == pytest.approx(bs.settings.asas_dt)
+        assert dt > getattr(bs.sim, "simdt", 0.05)
+
+    def test_dwell_reaches_the_target_in_the_expected_number_of_calls(self):
+        o = _bare(FTR2NAT)
+        o._rel_dwell_s = 15.0
+        key = frozenset(("A", "B"))
+        dt = 1.0
+        n = sum(1 for _ in range(20) if not o._release_ok(key, True, dt))
+        assert n == 14          # 15th call releases, not the 300th
