@@ -31,6 +31,8 @@
     FTRNAT and PastCPANAT are deliberately left untouched, so all four methods
     run in one batch at a single SHA.
 '''
+import os
+
 import numpy as np
 
 import bluesky as bs
@@ -79,6 +81,16 @@ class FTR2NAT_FIX(FTRNAT):
     def _intruder_settled_alt(self, intruder, idx2, alt_intr):
         ''' The level the intruder ends up at. Its CURRENT one, here. '''
         return alt_intr
+
+    def _intruder_settled_vs(self, intruder, idx2, vs_intr):
+        ''' The intruder's vertical rate in the SETTLED case, paired with
+            whatever `_intruder_settled_alt` returned.
+
+            The two must be consistent. Here the settled altitude IS the
+            current one, so the rate that carries it away from there is the
+            current rate.
+        '''
+        return vs_intr
 
     def _assumed_settled(self, alt_intr, apalt_own, vsrevert):
         ''' Where the pair ends up once BOTH have settled, under ASSUMED.
@@ -146,10 +158,15 @@ class FTR2NAT_FIX(FTRNAT):
         # Where the intruder ENDS UP -- again, not where the resolver is
         # currently holding it (see _intruder_settled_alt).
         alt_intr_end = self._intruder_settled_alt(intruder, idx2, alt_intr)
+        # ...and the rate that goes WITH that altitude. An altitude the
+        # intruder is heading for, paired with the rate it is using to get
+        # there, models it arriving and then carrying on through -- see
+        # _intruder_settled_vs.
+        vs_intr_end = self._intruder_settled_vs(intruder, idx2, vs_intr)
         clear = not self._revert_conflict(
             dist, vnow - vown, vrel_now, rpz, hpz, dtlook,
             dalt, vs_intr - vsown,
-            alt_intr_end - apalt_own, vs_intr, t_cap)
+            alt_intr_end - apalt_own, vs_intr_end, t_cap)
 
         # Criterion 2: the intruder reverts to its desired state too.
         if clear and self.intent != 'OFF':
@@ -305,6 +322,29 @@ class FTR2NAT_FIX(FTRNAT):
                 return alt_intr
         return alt_intr
 
+    def _intruder_settled_vs(self, intruder, idx2, vs_intr):
+        ''' Zero whenever `_intruder_settled_alt` returned a DESTINATION.
+
+            The fifth instance of "a resolver-held state is not intent", and
+            one this class introduced itself. `_intruder_settled_alt`
+            substitutes the intruder's route level for the level the resolver
+            is holding it at -- correctly -- but the rate stayed `desired_vs`,
+            the rate that flies it there. The settled case then reads "the
+            intruder is at its route level AND still climbing at 1500 fpm",
+            which is a contradiction: it models the aircraft arriving and
+            continuing straight through.
+
+            Measured on R01 under MVP2NAT_VERT (FTR2NAT_TRACE, 2026-08-24).
+            Criterion 1's settled branch held the pair on 98.1 % of ticks in
+            the (VC02, VC01) direction and 2.5 % in the other -- so the pair
+            was never released in 4002 s while the horizontal domains let go
+            at 272 s. The settled gap was 2551 ft against a 1050 ft zone, with
+            a settled rate of 6.26 m/s closing it in a predicted 84 s.
+        '''
+        if self._asas_owns(idx2):
+            return 0.0
+        return vs_intr
+
     @staticmethod
     def _asas_owns(idx):
         ''' Is the resolver currently commanding this aircraft?
@@ -449,3 +489,89 @@ class FTR2NAT_NODWELL(FTR2NAT):
     def __init__(self):
         super().__init__()
         self._rel_dwell_s = 0.0
+
+
+class FTR2NAT_TRACE(FTR2NAT):
+    ''' Diagnostic FTR2NAT: one CSV row per held pair per tick, naming the
+        predicate branch that held it. NEVER for production runs.
+
+        `FTR2NAT._revert_conflict` ORs four sub-predicates -- {reverted,
+        current} horizontal velocity x {now, settled} vertical case -- and
+        short-circuits on the first True, so nothing downstream can say WHICH
+        branch held a pair. This class evaluates all four, which cannot change
+        the outcome (the production return is the OR of the same four terms),
+        and records each one next to the exact arguments the predicate saw.
+
+        Two rows per pair per tick at most: crit 1 (the intruder holds its
+        state while the ownship reverts) and crit 2 (the intruder reverts too).
+        A pair held by crit 1 only, or by the settled branch only, points at a
+        different defect than one held by both.
+
+        The output path comes from the FTR2NAT_TRACE environment variable.
+        Unset means no file is written and the class behaves exactly as
+        FTR2NAT.
+    '''
+
+    COLUMNS = ("simt,ac1,ac2,crit,dist_m,rpz_m,hpz_m,dtlook_s,tl_now_s,"
+               "dalt_now_m,dvs_now_ms,dalt_settled_m,dvs_settled_ms,"
+               "b_revert_now,b_revert_settled,b_now_now,b_now_settled,"
+               "hold,dwell_s")
+
+    def __init__(self):
+        super().__init__()
+        self._trace_path = os.environ.get("FTR2NAT_TRACE", "")
+        self._trace_fh = None
+        self._calls = []
+
+    def reset(self):
+        super().reset()
+        self._close()
+        self._calls = []
+
+    def _close(self):
+        if self._trace_fh is not None:
+            try:
+                self._trace_fh.close()
+            finally:
+                self._trace_fh = None
+
+    def _fh(self):
+        if self._trace_fh is None and self._trace_path:
+            self._trace_fh = open(self._trace_path, "a", encoding="utf-8")
+            if self._trace_fh.tell() == 0:
+                self._trace_fh.write(self.COLUMNS + "\n")
+        return self._trace_fh
+
+    def _revert_conflict(self, dist, vrel_revert, vrel_now, rpz, hpz, dtlook,
+                         dalt_now, dvs_now, dalt_settled, dvs_settled,
+                         dtlook_now=None):
+        tl_now = dtlook if dtlook_now is None else min(dtlook, dtlook_now)
+        b = []
+        for vrel in (vrel_revert, vrel_now):
+            b.append(bool(FTRNAT.conflict_predicted(
+                dist, vrel, dalt_now, dvs_now, rpz, hpz, tl_now)))
+            b.append(bool(FTRNAT.conflict_predicted(
+                dist, vrel, dalt_settled, dvs_settled, rpz, hpz, dtlook)))
+        self._calls.append((float(np.linalg.norm(dist)), float(rpz), float(hpz),
+                            float(dtlook), float(tl_now),
+                            float(dalt_now), float(dvs_now),
+                            float(dalt_settled), float(dvs_settled), b))
+        return any(b)
+
+    def _pair_clears(self, conf, ownship, intruder, idx1, idx2, conflict):
+        self._calls = []
+        clear = super()._pair_clears(conf, ownship, intruder, idx1, idx2,
+                                     conflict)
+        fh = self._fh()
+        if fh is not None:
+            dwell = self._dwell.get(frozenset(conflict), 0.0)
+            simt = float(getattr(bs.sim, "simt", 0.0))
+            for crit, rec in enumerate(self._calls, start=1):
+                d, rpz, hpz, dtl, tln, dan, dvn, das, dvs, b = rec
+                fh.write("%.2f,%s,%s,%d,%.1f,%.1f,%.1f,%.1f,%.1f,"
+                         "%.1f,%.3f,%.1f,%.3f,%d,%d,%d,%d,%d,%.1f\n"
+                         % (simt, conflict[0], conflict[1], crit, d, rpz, hpz,
+                            dtl, tln, dan, dvn, das, dvs,
+                            b[0], b[1], b[2], b[3], any(b), dwell))
+            fh.flush()
+        return clear

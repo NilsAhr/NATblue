@@ -444,3 +444,57 @@ class TestIntruderUnderAsasIsNotIntent:
 
     def test_asas_owns_is_false_without_a_live_sim(self):
         assert FTR2NAT._asas_owns(0) in (True, False)
+
+
+# ---------------------------------------------------------------------------
+# The fifth instance -- and one FTR2NAT introduced itself.
+# ---------------------------------------------------------------------------
+class TestSettledAltitudeAndSettledRateMustAgree:
+    """`_intruder_settled_alt` substitutes the intruder's route level for the
+    level the resolver is holding it at. The paired rate stayed `desired_vs` --
+    the rate that flies it there -- so the settled case read "the intruder is
+    at its route level AND still climbing at 1500 fpm". That models an aircraft
+    arriving at its target and continuing straight through it.
+
+    Found by FTR2NAT_TRACE on R01 under MVP2NAT_VERT (2026-08-24): criterion
+    1's settled branch held the pair on 98.1 % of ticks in the (VC02, VC01)
+    direction and 2.5 % in the other, so the pair was never released in 4002 s
+    while the horizontal domains let go at 272 s. Settled gap 2551 ft against a
+    1050 ft zone, settled rate 6.26 m/s, predicted to close it in 84 s.
+    """
+
+    def test_the_fix_class_pairs_the_current_altitude_with_the_current_rate(self):
+        o = _bare(FTR2NAT_FIX)
+        traf = _StubTraf()
+        # FTR2NAT_FIX settles at the intruder's CURRENT altitude, so the rate
+        # that carries it away from there is the current one. Unchanged.
+        assert o._intruder_settled_alt(traf, 1, 35000.0 * FT) == 35000.0 * FT
+        assert o._intruder_settled_vs(traf, 1, 7.62) == 7.62
+
+    def test_a_destination_altitude_is_paired_with_a_zero_rate(self):
+        o = _bare(FTR2NAT)
+        traf = _StubTraf()
+        o._asas_owns = lambda idx: True
+        # The altitude is now a DESTINATION, so the rate that gets it there
+        # must not also carry it beyond.
+        assert o._intruder_settled_vs(traf, 1, 7.62) == 0.0
+
+    def test_an_unheld_intruder_keeps_its_own_rate(self):
+        o = _bare(FTR2NAT)
+        traf = _StubTraf()
+        o._asas_owns = lambda idx: False
+        # Nothing was substituted, so nothing may be zeroed: an intruder flying
+        # its own plan really is at its current level moving at its own rate.
+        assert o._intruder_settled_vs(traf, 1, 7.62) == 7.62
+
+    def test_the_measured_r01_geometry_releases_once_the_pair_agrees(self):
+        o = _bare(FTR2NAT)
+        # The numbers the trace recorded on the holding direction: settled gap
+        # 2551 ft, zone 1050 ft, horizontal already inside RPZ and closing.
+        args = (np.asarray(HEADON_DIST, float), np.asarray(HEADON_VREL, float),
+                np.asarray(HEADON_VREL, float), RPZ, HPZ * 1.05, DTLOOK,
+                2100.0 * FT, 0.0)
+        held = o._revert_conflict(*args, -2551.0 * FT, 6.26)
+        clear = o._revert_conflict(*args, -2551.0 * FT, 0.0)
+        assert held is True      # arrives at its level, then flies on through
+        assert clear is False    # arrives at its level and stays there
