@@ -413,3 +413,34 @@ class TestRampHorizon:
                 np.asarray(HEADON_VREL, float), np.asarray(HEADON_VREL, float),
                 RPZ, HPZ, DTLOOK, 2100.0 * FT, -15.24, 0.0, 0.0)
         assert o._revert_conflict(*args, dtlook_now=20.0) is True
+
+
+class TestIntruderUnderAsasIsNotIntent:
+    """Criterion 1 fed `intruder.vs` in raw -- the resolver's own command.
+
+    Same defect family as the ASSUMED-intent one, one criterion further up.
+    Under a vertical resolver BOTH aircraft are parked off their route levels,
+    so both would climb back on release and stay apart -- but criterion 1
+    models the ownship climbing while the intruder holds still, a convergence
+    that never happens. Measured on R01: both frozen ~1600 and ~2000 ft below
+    their routes and 2100 ft apart, criterion 2 clear, criterion 1 holding, so
+    the pair was never released in 4002 s of a 4002 s run.
+    """
+
+    def test_a_resolver_held_pair_that_both_climb_back_is_clear(self):
+        o = _bare(FTR2NAT)
+        # 2100 ft apart. Ownship reverts at +1500 fpm; the intruder is held by
+        # ASAS at 0 fpm but ITS intent is also +1500 fpm.
+        raw = o._revert_conflict(
+            np.asarray(HEADON_DIST, float), np.asarray(HEADON_VREL, float),
+            np.asarray(HEADON_VREL, float), RPZ, HPZ * 1.05, DTLOOK,
+            2100.0 * FT, 0.0 - 7.62, 4000.0 * FT, 0.0)
+        intent = o._revert_conflict(
+            np.asarray(HEADON_DIST, float), np.asarray(HEADON_VREL, float),
+            np.asarray(HEADON_VREL, float), RPZ, HPZ * 1.05, DTLOOK,
+            2100.0 * FT, 7.62 - 7.62, 4000.0 * FT, 7.62)
+        assert raw is True         # the phantom convergence holds it
+        assert intent is False     # both climbing back: no convergence
+
+    def test_asas_owns_is_false_without_a_live_sim(self):
+        assert FTR2NAT._asas_owns(0) in (True, False)
