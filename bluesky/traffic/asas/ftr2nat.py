@@ -118,12 +118,17 @@ class FTR2NAT_FIX(FTRNAT):
         # it is what detection sees during that transient.
         vrel_now = vnow - np.array([ownship.gseast[idx1], ownship.gsnorth[idx1]])
 
+        # How long the ownship would still be climbing/descending after it
+        # reverts, before it captures its commanded level. Past that moment the
+        # "now" rate is fiction -- see _ramp_horizon.
+        t_cap = self._ramp_horizon(alt_own, apalt_own, vsown, dtlook)
+
         # Criterion 1: the intruder holds its current state while the ownship
         # reverts and settles at its commanded level.
         clear = not self._revert_conflict(
             dist, vnow - vown, vrel_now, rpz, hpz, dtlook,
             dalt, intruder.vs[idx2] - vsown,
-            alt_intr - apalt_own, intruder.vs[idx2])
+            alt_intr - apalt_own, intruder.vs[idx2], t_cap)
 
         # Criterion 2: the intruder reverts to its desired state too.
         if clear and self.intent != 'OFF':
@@ -149,7 +154,7 @@ class FTR2NAT_FIX(FTRNAT):
                 clear = not self._revert_conflict(
                     dist, vrevert - vown, vrel_now, rpz, hpz, dtlook,
                     dalt, vsrevert - vsown,
-                    dalt_settled, dvs_settled)
+                    dalt_settled, dvs_settled, t_cap)
         return clear
 
     def _release_zones(self, conf, idx1, idx2):
@@ -157,10 +162,28 @@ class FTR2NAT_FIX(FTRNAT):
         return (np.max(conf.rpz[[idx1, idx2]]),
                 np.max(conf.hpz[[idx1, idx2]]))
 
+    @staticmethod
+    def _ramp_horizon(alt, apalt, vs_desired, dtlook):
+        ''' How long the reverted vertical ramp actually lasts, in seconds.
+
+            revert_conflict brackets the ramp-then-hold profile by ORing a
+            "now" case (current levels closing at the current rate) with a
+            "settled" case. The now case extrapolates that rate FOREVER, which
+            is what the bracket is for -- but it means any transient
+            convergence during level capture holds the pair indefinitely.
+            Bounding the now case by the capture time is the missing half of
+            the bracket: a predicted conflict that only happens AFTER the
+            aircraft has levelled off is not a conflict.
+        '''
+        if abs(vs_desired) < 1e-6:
+            return dtlook
+        return min(float(dtlook), abs(apalt - alt) / abs(vs_desired))
+
     def _revert_conflict(self, dist, vrel_revert, vrel_now, rpz, hpz, dtlook,
-                         dalt_now, dvs_now, dalt_settled, dvs_settled):
-        ''' Hold-or-release for one direction. `vrel_now` is unused here and is
-            taken up by FTR2NAT's horizontal bracket. '''
+                         dalt_now, dvs_now, dalt_settled, dvs_settled,
+                         dtlook_now=None):
+        ''' Hold-or-release for one direction. `vrel_now` and `dtlook_now` are
+            unused here and are taken up by FTR2NAT. '''
         return FTRNAT.revert_conflict(dist, vrel_revert, rpz, hpz, dtlook,
                                       dalt_now, dvs_now,
                                       dalt_settled, dvs_settled)
@@ -303,20 +326,35 @@ class FTR2NAT(FTR2NAT_FIX):
                 np.max(conf.hpz[[idx1, idx2]]) * facv)
 
     def _revert_conflict(self, dist, vrel_revert, vrel_now, rpz, hpz, dtlook,
-                         dalt_now, dvs_now, dalt_settled, dvs_settled):
-        ''' Bracket the horizontal reversion as well as the vertical one.
+                         dalt_now, dvs_now, dalt_settled, dvs_settled,
+                         dtlook_now=None):
+        """Bracket the reversion in BOTH planes, and bound the ramp in time.
 
-            The reverted velocity is exact once the aircraft has finished
-            turning; the current velocity is exact until it starts. Hold if
-            either is in conflict -- conservative where they overlap, which is
-            the right direction of error for a release.
-        '''
-        if FTRNAT.revert_conflict(dist, vrel_revert, rpz, hpz, dtlook,
-                                  dalt_now, dvs_now, dalt_settled, dvs_settled):
-            return True
-        return FTRNAT.revert_conflict(dist, vrel_now, rpz, hpz, dtlook,
-                                      dalt_now, dvs_now,
-                                      dalt_settled, dvs_settled)
+        Two brackets, ORed as FTRNAT's is -- hold if any branch conflicts.
+
+        HORIZONTAL: the reverted velocity is exact once the aircraft has
+        finished turning; the current velocity is exact until it starts. FTRNAT
+        only ever uses the reverted one, so it assumes the turn is
+        instantaneous.
+
+        VERTICAL, and this is the part that decides whether the vertical domain
+        can release at all: the "now" case is bounded by the CAPTURE time. The
+        resolver parks an aircraft off its route level, so desired_vs is
+        +/-1500 fpm back toward it, and an unbounded now-case reads that as a
+        permanent closure and holds the pair for ever. A predicted conflict
+        that only happens after the aircraft has levelled off is not a
+        conflict. The settled case keeps the full lookahead, so a genuine
+        convergence is still caught.
+        """
+        tl_now = dtlook if dtlook_now is None else min(dtlook, dtlook_now)
+        for vrel in (vrel_revert, vrel_now):
+            if FTRNAT.conflict_predicted(dist, vrel, dalt_now, dvs_now,
+                                         rpz, hpz, tl_now):
+                return True
+            if FTRNAT.conflict_predicted(dist, vrel, dalt_settled, dvs_settled,
+                                         rpz, hpz, dtlook):
+                return True
+        return False
 
     def _release_ok(self, key, clear, dt):
         ''' Release only after the clearance has held for the dwell time. '''

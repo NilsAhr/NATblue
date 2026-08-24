@@ -369,3 +369,47 @@ class TestDwellUsesTheResumenavInterval:
         dt = 1.0
         n = sum(1 for _ in range(20) if not o._release_ok(key, True, dt))
         assert n == 14          # 15th call releases, not the 300th
+
+
+class TestRampHorizon:
+    """The "now" case must not extrapolate a level-capture rate for ever.
+
+    revert_conflict brackets the ramp-then-hold profile by ORing a "now" case
+    with a "settled" case, and the now case extrapolates the current rate
+    forever. Under a vertical resolver that is fatal: the aircraft is parked
+    off its route level, desired_vs is +/-1500 fpm back toward it, and the
+    unbounded now-case reads that as a permanent closure. Measured: FTR2NAT
+    held R01 for all 4002 s in the vertical domain while releasing it at 272 s
+    in both horizontal domains.
+    """
+
+    def test_capture_time_from_the_offset_and_the_rate(self):
+        # 1050 ft to recover at 1500 fpm is 42 s.
+        t = FTR2NAT._ramp_horizon(alt=10668.0, apalt=10668.0 + 1050.0 * FT,
+                                  vs_desired=7.62, dtlook=DTLOOK)
+        assert t == pytest.approx(42.0, abs=0.5)
+
+    def test_a_level_aircraft_gets_the_full_lookahead(self):
+        assert FTR2NAT._ramp_horizon(10668.0, 10668.0, 0.0, DTLOOK) == DTLOOK
+
+    def test_never_longer_than_the_lookahead(self):
+        assert FTR2NAT._ramp_horizon(0.0, 1e6, 1.0, DTLOOK) == DTLOOK
+
+    def test_a_convergence_after_capture_no_longer_holds(self):
+        # Pair 2100 ft apart, reverting toward each other at 3000 fpm, so they
+        # would be co-level in 42 s -- but each captures its level after 42 s,
+        # so it never happens. Bounded: clear. Unbounded: held.
+        o = _bare(FTR2NAT)
+        args = (np.asarray(HEADON_DIST, float),
+                np.asarray(HEADON_VREL, float), np.asarray(HEADON_VREL, float),
+                RPZ, HPZ, DTLOOK, 2100.0 * FT, -15.24, 4000.0 * FT, 0.0)
+        assert o._revert_conflict(*args, dtlook_now=DTLOOK) is True
+        assert o._revert_conflict(*args, dtlook_now=20.0) is False
+
+    def test_a_genuine_convergence_is_still_caught_by_the_settled_case(self):
+        # Same bounded horizon, but the pair really does end up co-level.
+        o = _bare(FTR2NAT)
+        args = (np.asarray(HEADON_DIST, float),
+                np.asarray(HEADON_VREL, float), np.asarray(HEADON_VREL, float),
+                RPZ, HPZ, DTLOOK, 2100.0 * FT, -15.24, 0.0, 0.0)
+        assert o._revert_conflict(*args, dtlook_now=20.0) is True
