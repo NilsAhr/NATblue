@@ -227,17 +227,40 @@ class LoggerffAsas(Entity):
         self.flst    = datalog.crelog('FLSTLOG_ASAS', None, flstheader)
         self.conflog = datalog.crelog('CONFLOG_ASAS', None, confheader)
 
+        # Last sim time seen by update(). The RESET path flushes AFTER
+        # Simulation.reset() has zeroed sim.simt (simulation.py:206 runs before
+        # bs.traf.reset() at :216, which is what triggers our reset()), so
+        # sim.simt is useless as an end-of-conflict stamp there. This is.
+        self._last_simt = 0.0
+
         # Hook into conflog.reset() so active conflicts are flushed
         # before the CSV file is closed.  This covers both RESET and
         # QUIT paths (datalog.reset() calls conflog.reset()).
-        _original_conflog_reset = self.conflog.reset
-        def _conflog_reset_with_flush():
-            self._flush_active_conflicts()
-            _original_conflog_reset()
-        self.conflog.reset = _conflog_reset_with_flush
+        #
+        # Installed ONCE per logger, not once per LoggerffAsas. crelog returns
+        # the EXISTING logger when the name is already registered
+        # (datalog.py:45), so a second __init__ would otherwise wrap its own
+        # wrapper, nesting closures that each hold a stale `self`. The wrapper
+        # delegates to whichever instance currently owns the logger instead.
+        conflog = self.conflog
+        conflog._flush_owner = self
+        if not getattr(conflog, '_flush_hooked', False):
+            _original_conflog_reset = conflog.reset
 
-        # Safety net: also register with atexit for abnormal shutdowns
-        atexit.register(self._flush_active_conflicts)
+            def _conflog_reset_with_flush():
+                owner = getattr(conflog, '_flush_owner', None)
+                if owner is not None:
+                    owner._flush_active_conflicts()
+                _original_conflog_reset()
+
+            conflog.reset = _conflog_reset_with_flush
+            conflog._flush_hooked = True
+
+            # Safety net for abnormal shutdowns. Also once per logger: an
+            # atexit registration per instance would replay the same flush.
+            atexit.register(
+                lambda: getattr(conflog, '_flush_owner', None)
+                and conflog._flush_owner._flush_active_conflicts())
 
         with self.settrafarrays():
             self.distance2D       = np.array([])
@@ -247,14 +270,121 @@ class LoggerffAsas(Entity):
             self.last_update_time = np.array([])
 
     # ------------------------------------------------------------------
+    def _asas_flags(self, ac1, ac2):
+        """ASAS-active flag per aircraft, or -1 if it has been deleted."""
+        try:
+            ntraf = traf.ntraf
+            i1, i2 = traf.id2idx(ac1), traf.id2idx(ac2)
+            return (int(traf.cr.active[i1]) if 0 <= i1 < ntraf else -1,
+                    int(traf.cr.active[i2]) if 0 <= i2 < ntraf else -1)
+        except Exception:
+            return -1, -1
+
+    def _write_conflict_row(self, cpf, ac1, ac2, toutconf, duration):
+        """Emit one CONFLOG row for a finished conflict event.
+
+        Shared by the end-of-conflict path and by the end-of-simulation flush.
+        The two used to carry 34 duplicated arguments each, which is how they
+        drifted apart in the first place.
+
+        Every field comes from the per-event dicts, never from live traffic, so
+        a row is complete even when both aircraft have already been deleted.
+        """
+        try:
+            rpz_val = bs.traf.cd.rpz_def if hasattr(bs.traf.cd, 'rpz_def') else (5.0 * nm)
+        except Exception:
+            rpz_val = 5.0 * nm
+        los_sev = self.dist.get(cpf, rpz_val) / rpz_val if rpz_val > 0 else -1
+        asas1, asas2 = self._asas_flags(ac1, ac2)
+
+        self.conflog.log(
+            ac1, ac2,
+            self.init_lat1.get(cpf, np.nan),
+            self.init_lon1.get(cpf, np.nan),
+            self.init_alt1.get(cpf, np.nan) / ft,
+            self.init_lat2.get(cpf, np.nan),
+            self.init_lon2.get(cpf, np.nan),
+            self.init_alt2.get(cpf, np.nan) / ft,
+            self.init_hdg1.get(cpf, np.nan),
+            self.init_hdg2.get(cpf, np.nan),
+            self.init_vs1.get(cpf, np.nan),
+            self.init_vs2.get(cpf, np.nan),
+            self.init_vsreal1.get(cpf, np.nan),
+            self.init_vsreal2.get(cpf, np.nan),
+            self.dcpa.get(cpf, np.nan) / nm,
+            self.tcpa.get(cpf, np.nan),
+            self.tLOS.get(cpf, -1),
+            self.qdr.get(cpf, np.nan),
+            self.dist.get(cpf, np.nan) / nm,
+            self.dalt.get(cpf, np.nan) / ft,
+            self.tinconf.get(cpf, np.nan),
+            toutconf,
+            duration,
+            int(self.intrusion_occurred.get(cpf, False)),
+            # --- ASAS diagnostic columns ---
+            self.init_conflict_angle.get(cpf, np.nan),
+            asas1,
+            asas2,
+            self.init_mach1.get(cpf, np.nan),
+            self.init_mach2.get(cpf, np.nan),
+            self.init_selalt1.get(cpf, np.nan),
+            self.init_selalt2.get(cpf, np.nan),
+            self.init_tas1.get(cpf, np.nan),
+            self.init_tas2.get(cpf, np.nan),
+            los_sev,
+        )
+
+    def _close_conflict(self, cpf, toutconf):
+        """Log a finished event and drop the state it accumulated."""
+        # self.duration is keyed by frozenset, so this pair order is arbitrary.
+        # Harmless -- the postprocessing dedup key is the SORTED pair -- and
+        # sorting here would change the output of every existing run.
+        ac1, ac2 = tuple(cpf)
+        self._write_conflict_row(cpf, ac1, ac2, toutconf, self.duration[cpf])
+        del self.duration[cpf]
+        self.toutconf[cpf] = toutconf
+        # The event is over: drop its accumulated state so a re-detection of
+        # this pair starts clean (2026-08-20).
+        self._clear_conflict_state(cpf)
+
+    def _log_ended_conflicts(self, confpairs_unique, simt):
+        """Advance every tracked pair: tick its duration, or close it.
+
+        Split out of update() for BUG-02 (2026-08-24). It used to be inline
+        AFTER the `if traf.ntraf == 0: return` guard, so the tick that deleted
+        the last aircraft was also the tick that stopped conflicts ever being
+        closed -- and any pair still open was orphaned in self.duration.
+        """
+        for cpf in list(self.duration):
+            if cpf in confpairs_unique:
+                self.duration[cpf] += 1
+            else:
+                self._close_conflict(cpf, simt)
+
+    # ------------------------------------------------------------------
     def _flush_active_conflicts(self):
         """Write all still-active conflicts to conflog before reset/quit.
 
-        This ensures that conflicts which are ongoing when the simulation
-        ends (HOLD / RESET / QUIT) are not silently lost.
+        The net for the paths update() cannot cover: HOLD, QUIT, and a hard
+        shutdown. With BUG-02 fixed, the ordinary end-of-simulation case is
+        closed by _log_ended_conflicts() at the real sim time instead, so this
+        should now write nothing on a normal run.
 
-        Safe to call multiple times — clears self.duration after flushing
-        so a second call (e.g. atexit after reset) is a no-op.
+        Two traps this has to work around, both outside the plugin:
+
+        * `sim.simt` is already 0.0 here on the RESET path -- Simulation.reset()
+          zeroes it (simulation.py:206) before bs.traf.reset() (:216) triggers
+          our reset(). So the end stamp comes from self._last_simt.
+        * CSVLogger.log is gated on `bs.sim.simt >= self.tlog` (datalog.py:170),
+          and tlog is the STARTLOG time -- 30 s in the paper3 batches. With simt
+          zeroed the gate is False, there is no else branch and no warning, and
+          every flushed row is discarded in silence. That gate is meant for
+          PERIODIC loggers; CONFLOG is an event logger (dt=None -> 0.0). We drop
+          tlog around the write and restore it, rather than patching core
+          BlueSky shared with upstream.
+
+        Safe to call repeatedly -- self.duration is emptied, so a second call
+        (e.g. atexit after reset) writes nothing.
         """
         if not self.duration:
             return  # nothing to flush
@@ -263,73 +393,21 @@ class LoggerffAsas(Entity):
         if not (hasattr(self, 'conflog') and self.conflog.isopen()):
             return
 
-        # Guard: traf may already be torn down during shutdown
-        try:
-            ntraf = traf.ntraf
-        except Exception:
-            ntraf = 0
-
+        toutconf = getattr(self, '_last_simt', 0.0)
+        saved_tlog = getattr(self.conflog, 'tlog', None)
         n_flushed = 0
-        for pair, dur in list(self.duration.items()):
-            cpf = frozenset(pair)
-            ac1, ac2 = tuple(pair)
-
-            try:
-                i1, i2 = traf.id2idx(ac1), traf.id2idx(ac2)
-                asas1 = int(traf.cr.active[i1]) if 0 <= i1 < ntraf else -1
-                asas2 = int(traf.cr.active[i2]) if 0 <= i2 < ntraf else -1
-            except Exception:
-                asas1 = asas2 = -1
-
-            try:
-                rpz_val = bs.traf.cd.rpz_def if hasattr(bs.traf.cd, 'rpz_def') else (5.0 * nm)
-            except Exception:
-                rpz_val = 5.0 * nm
-            los_sev = self.dist.get(cpf, rpz_val) / rpz_val if rpz_val > 0 else -1
-
-            self.conflog.log(
-                ac1, ac2,
-                self.init_lat1.get(cpf, np.nan),
-                self.init_lon1.get(cpf, np.nan),
-                self.init_alt1.get(cpf, np.nan) / ft,
-                self.init_lat2.get(cpf, np.nan),
-                self.init_lon2.get(cpf, np.nan),
-                self.init_alt2.get(cpf, np.nan) / ft,
-                self.init_hdg1.get(cpf, np.nan),
-                self.init_hdg2.get(cpf, np.nan),
-                self.init_vs1.get(cpf, np.nan),
-                self.init_vs2.get(cpf, np.nan),
-                self.init_vsreal1.get(cpf, np.nan),
-                self.init_vsreal2.get(cpf, np.nan),
-                self.dcpa.get(cpf, np.nan) / nm,
-                self.tcpa.get(cpf, np.nan),
-                self.tLOS.get(cpf, -1),
-                self.qdr.get(cpf, np.nan),
-                self.dist.get(cpf, np.nan) / nm,
-                self.dalt.get(cpf, np.nan) / ft,
-                self.tinconf.get(cpf, np.nan),
-                sim.simt,
-                dur,
-                int(self.intrusion_occurred.get(cpf, False)),
-                # --- ASAS diagnostic columns ---
-                self.init_conflict_angle.get(cpf, np.nan),
-                asas1,
-                asas2,
-                self.init_mach1.get(cpf, np.nan),
-                self.init_mach2.get(cpf, np.nan),
-                self.init_selalt1.get(cpf, np.nan),
-                self.init_selalt2.get(cpf, np.nan),
-                self.init_tas1.get(cpf, np.nan),
-                self.init_tas2.get(cpf, np.nan),
-                los_sev,
-            )
-            n_flushed += 1
-
-        # Clear so we don't double-write (reset also clears, but just in case)
-        self.duration.clear()
+        try:
+            if saved_tlog is not None:
+                self.conflog.tlog = float('-inf')
+            for cpf in list(self.duration):
+                self._close_conflict(cpf, toutconf)
+                n_flushed += 1
+        finally:
+            if saved_tlog is not None:
+                self.conflog.tlog = saved_tlog
 
         print(f"LOGGERFF_ASAS: Flushed {n_flushed} active "
-              f"conflict(s) to conflog at simt={sim.simt:.1f}s")
+              f"conflict(s) to conflog at simt={toutconf:.1f}s")
 
     # ------------------------------------------------------------------
     def reset(self):
@@ -455,6 +533,11 @@ class LoggerffAsas(Entity):
         4. Conflict processing (extended)
         5. Flight-state logging (extended)
         """
+        # The last sim time we actually saw. The reset-path flush runs after
+        # Simulation.reset() has zeroed sim.simt, so this is the only honest
+        # end-of-conflict stamp available there.
+        self._last_simt = sim.simt
+
         # ==============================================================
         # 1. AIRCRAFT DELETION
         # ==============================================================
@@ -519,6 +602,23 @@ class LoggerffAsas(Entity):
             return
 
         if traf.ntraf == 0:
+            # BUG-02. No traffic means no confpairs, so every pair still in
+            # self.duration has ended by definition -- close them HERE, at the
+            # real sim time. This guard used to sit in front of the
+            # end-of-conflict block, so the tick that deleted the last aircraft
+            # was also the tick that stopped conflicts ever being closed, and
+            # an open pair was orphaned until the reset-path flush (which then
+            # stamped toutconf = 0 and was silently discarded by the periodic
+            # logger gate). Measured: 9 of 175 synthetic runs logged ZERO
+            # conflict rows against up to 4739 s of real loss of separation.
+            #
+            # An EMPTY set, deliberately, not traf.cd.confpairs_unique:
+            # Traffic.update() returns at `if self.ntraf == 0` before reaching
+            # cd.update() (traffic.py:394,407), so confpairs_unique is stale
+            # here -- it still holds the pairs from the last tick that had
+            # traffic. Passing it would leave every pair looking "still in
+            # conflict" and the bug unfixed.
+            self._log_ended_conflicts(set(), sim.simt)
             return
 
         n = traf.ntraf
@@ -621,65 +721,7 @@ class LoggerffAsas(Entity):
                 self.init_tas2[up]    = traf.tas[i2] / kts
 
         # --- Duration update & end-of-conflict logging ---
-        for pair, dur in list(self.duration.items()):
-            cpf = frozenset(pair)
-            if cpf in traf.cd.confpairs_unique:
-                self.duration[pair] += 1
-            else:
-                # Conflict ended — log it
-                ac1, ac2 = tuple(pair)
-                i1, i2 = traf.id2idx(ac1), traf.id2idx(ac2)
-
-                # ASAS active state at conflict end (aircraft may be deleted)
-                asas1 = int(traf.cr.active[i1]) if i1 >= 0 else -1
-                asas2 = int(traf.cr.active[i2]) if i2 >= 0 else -1
-
-                # LoS severity: min_dist / rpz  (1 = just touching, 0 = on top)
-                rpz_val = bs.traf.cd.rpz_def if hasattr(bs.traf.cd, 'rpz_def') else (5.0 * nm)
-                los_sev = self.dist.get(cpf, rpz_val) / rpz_val if rpz_val > 0 else -1
-
-                self.conflog.log(
-                    # --- standard columns ---
-                    ac1, ac2,
-                    self.init_lat1.get(cpf, np.nan),
-                    self.init_lon1.get(cpf, np.nan),
-                    self.init_alt1.get(cpf, np.nan) / ft,
-                    self.init_lat2.get(cpf, np.nan),
-                    self.init_lon2.get(cpf, np.nan),
-                    self.init_alt2.get(cpf, np.nan) / ft,
-                    self.init_hdg1.get(cpf, np.nan),
-                    self.init_hdg2.get(cpf, np.nan),
-                    self.init_vs1.get(cpf, np.nan),
-                    self.init_vs2.get(cpf, np.nan),
-                    self.init_vsreal1.get(cpf, np.nan),
-                    self.init_vsreal2.get(cpf, np.nan),
-                    self.dcpa.get(cpf, np.nan) / nm,
-                    self.tcpa.get(cpf, np.nan),
-                    self.tLOS.get(cpf, -1),
-                    self.qdr.get(cpf, np.nan),
-                    self.dist.get(cpf, np.nan) / nm,
-                    self.dalt.get(cpf, np.nan) / ft,
-                    self.tinconf.get(cpf, np.nan),
-                    sim.simt,                           # toutconf
-                    self.duration[pair],
-                    int(self.intrusion_occurred.get(cpf, False)),
-                    # --- ASAS diagnostic columns ---
-                    self.init_conflict_angle.get(cpf, np.nan),
-                    asas1,
-                    asas2,
-                    self.init_mach1.get(cpf, np.nan),
-                    self.init_mach2.get(cpf, np.nan),
-                    self.init_selalt1.get(cpf, np.nan),
-                    self.init_selalt2.get(cpf, np.nan),
-                    self.init_tas1.get(cpf, np.nan),
-                    self.init_tas2.get(cpf, np.nan),
-                    los_sev,
-                )
-                del self.duration[pair]
-                self.toutconf[cpf] = sim.simt
-                # The event is over: drop its accumulated state so a
-                # re-detection of this pair starts clean (2026-08-20).
-                self._clear_conflict_state(cpf)
+        self._log_ended_conflicts(traf.cd.confpairs_unique, sim.simt)
 
         # ==============================================================
         # 5. FLIGHT-STATE LOGGING  (extended)

@@ -149,3 +149,175 @@ class TestClearScope:
         """update() clears on every conflict end; a pair that never reached
         the severity loop has no entries and must not raise."""
         log._clear_conflict_state(OTHER)
+
+
+# ===========================================================================
+# BUG-02 (2026-08-24): conflicts still active at simulation end were lost.
+#
+# Measured on the synthetic suite: 9 of 175 runs logged ZERO conflict rows
+# while the aircraft were in genuine loss of separation -- one of them for
+# 4739 s. Every case was a pair still in conflict when the last aircraft was
+# deleted. The failure is silent and points the wrong way: an unreleased pair
+# is what a BADLY behaving resolver produces, so the worse the resolver, the
+# emptier its CONFLOG, and an empty CONFLOG reads as "no conflicts".
+#
+# Three links, all confirmed in code:
+#   1. `if traf.ntraf == 0: return` (update, ~line 521) sits BEFORE the
+#      end-of-conflict logging block, so the tick that deletes the last
+#      aircraft is the tick that stops conflicts ever being closed.
+#   2. On the RESET path Simulation.reset() zeroes sim.simt BEFORE
+#      bs.traf.reset() triggers the flush, so the flush stamps toutconf = 0.
+#   3. CSVLogger.log is gated on `bs.sim.simt >= self.tlog`, and tlog is the
+#      STARTLOG time -- so with simt == 0 every flushed row is discarded with
+#      no error at all.
+# ===========================================================================
+class FakeConflog:
+    """Stands in for the CSVLogger: records rows and honours the tlog gate.
+
+    The gate is reproduced deliberately -- it is the mechanism that discarded
+    the rows, so a fake without it could not catch the regression.
+    """
+
+    def __init__(self, tlog=0.0):
+        self.rows = []
+        self.tlog = tlog
+        self.dt = 0.0
+        self._open = True
+        self.simt = 0.0
+
+    def isopen(self):
+        return self._open
+
+    def log(self, *vals):
+        if self._open and self.simt >= self.tlog:
+            self.rows.append(vals)
+
+
+@pytest.fixture
+def flushlog(log):
+    """A bare logger with the conflict dicts plus a fake conflog."""
+    log.duration = {}
+    log.init_lat1 = {}; log.init_lon1 = {}; log.init_alt1 = {}
+    log.init_lat2 = {}; log.init_lon2 = {}; log.init_alt2 = {}
+    log.init_hdg1 = {}; log.init_hdg2 = {}
+    log.init_vs1 = {}; log.init_vs2 = {}
+    log.init_vsreal1 = {}; log.init_vsreal2 = {}
+    log.init_conflict_angle = {}
+    log.init_mach1 = {}; log.init_mach2 = {}
+    log.init_selalt1 = {}; log.init_selalt2 = {}
+    log.init_tas1 = {}; log.init_tas2 = {}
+    log.conflog = FakeConflog()
+    log._last_simt = 0.0
+    return log
+
+
+class TestEndLogRunsWithoutTraffic:
+    """The pair must be closed on the tick the traffic empties."""
+
+    def test_a_pair_absent_from_confpairs_is_logged(self, flushlog):
+        flushlog.duration[PAIR] = 42
+        flushlog.tinconf[PAIR] = 100.0
+        flushlog._last_simt = 500.0
+        flushlog.conflog.simt = 500.0
+        # Empty confpairs is exactly the no-traffic case.
+        flushlog._log_ended_conflicts(confpairs_unique=set(), simt=500.0)
+        assert len(flushlog.conflog.rows) == 1
+        assert PAIR not in flushlog.duration
+        assert flushlog.toutconf[PAIR] == 500.0
+
+    def test_a_pair_still_in_conflict_is_not_logged(self, flushlog):
+        flushlog.duration[PAIR] = 42
+        flushlog._log_ended_conflicts(confpairs_unique={PAIR}, simt=500.0)
+        assert flushlog.conflog.rows == []
+        assert flushlog.duration[PAIR] == 43       # duration keeps counting
+
+    def test_ending_a_pair_clears_its_event_state(self, flushlog):
+        flushlog.duration[PAIR] = 1
+        flushlog._note_conflict_state(PAIR, dist_now=1000.0, simt=100.0,
+                                      in_los=True)
+        flushlog._log_ended_conflicts(confpairs_unique=set(), simt=500.0)
+        # Same teardown as the in-traffic path, so a re-detection starts clean.
+        assert PAIR not in flushlog.tinconf
+        assert PAIR not in flushlog.dist
+        assert PAIR not in flushlog.intrusion_occurred
+
+    def test_other_pairs_still_in_conflict_are_untouched(self, flushlog):
+        flushlog.duration[PAIR] = 1
+        flushlog.duration[OTHER] = 1
+        flushlog._log_ended_conflicts(confpairs_unique={OTHER}, simt=500.0)
+        assert len(flushlog.conflog.rows) == 1
+        assert OTHER in flushlog.duration
+
+
+class TestFlushCannotBeSilentlyDiscarded:
+    """The reset-path flush must survive the periodic-logger gate."""
+
+    def test_flush_writes_even_when_tlog_is_ahead_of_simt(self, flushlog):
+        # THE REGRESSION. Simulation.reset() zeroes simt before the flush, and
+        # tlog is the STARTLOG time (30 s in the paper3 batches), so the gate
+        # `simt >= tlog` is False and the row vanishes without an error.
+        flushlog.duration[PAIR] = 10
+        flushlog._last_simt = 4800.0
+        flushlog.conflog.tlog = 30.0
+        flushlog.conflog.simt = 0.0                # sim.simt already zeroed
+        flushlog._flush_active_conflicts()
+        assert len(flushlog.conflog.rows) == 1
+
+    def test_flush_restores_tlog(self, flushlog):
+        flushlog.duration[PAIR] = 10
+        flushlog.conflog.tlog = 30.0
+        flushlog._flush_active_conflicts()
+        assert flushlog.conflog.tlog == 30.0
+
+    def test_flush_restores_tlog_even_if_the_write_raises(self, flushlog):
+        def boom(*_):
+            raise RuntimeError("disk full")
+        flushlog.duration[PAIR] = 10
+        flushlog.conflog.tlog = 30.0
+        flushlog.conflog.log = boom
+        with pytest.raises(RuntimeError):
+            flushlog._flush_active_conflicts()
+        assert flushlog.conflog.tlog == 30.0
+
+    def test_flush_stamps_the_last_real_sim_time(self, flushlog):
+        # Not sim.simt, which is 0.0 by the time the reset path gets here.
+        flushlog.duration[PAIR] = 10
+        flushlog.tinconf[PAIR] = 100.0
+        flushlog._last_simt = 4800.0
+        flushlog._flush_active_conflicts()
+        assert flushlog.toutconf[PAIR] == 4800.0
+
+    def test_second_flush_does_not_write_again(self, flushlog):
+        flushlog.duration[PAIR] = 10
+        flushlog._flush_active_conflicts()
+        flushlog._flush_active_conflicts()
+        assert len(flushlog.conflog.rows) == 1
+
+    def test_flush_is_a_no_op_once_the_file_is_closed(self, flushlog):
+        flushlog.duration[PAIR] = 10
+        flushlog.conflog._open = False
+        flushlog._flush_active_conflicts()
+        assert flushlog.conflog.rows == []
+
+    def test_flush_clears_event_state_like_the_end_log_path(self, flushlog):
+        flushlog.duration[PAIR] = 10
+        flushlog._note_conflict_state(PAIR, dist_now=1000.0, simt=100.0,
+                                      in_los=True)
+        flushlog._flush_active_conflicts()
+        assert PAIR not in flushlog.tinconf
+        assert PAIR not in flushlog.intrusion_occurred
+
+    def test_a_stale_confpairs_set_would_have_left_the_bug_unfixed(self, flushlog):
+        """Why update() passes an EMPTY set, not traf.cd.confpairs_unique.
+
+        Traffic.update() returns at `if self.ntraf == 0` before reaching
+        cd.update() (traffic.py:394,407), so on the no-traffic tick
+        confpairs_unique still holds the pairs from the last tick that HAD
+        traffic. Handing that stale set to _log_ended_conflicts closes nothing.
+        """
+        flushlog.duration[PAIR] = 42
+        stale = {PAIR}                       # what cd still reports
+        flushlog._log_ended_conflicts(stale, simt=500.0)
+        assert flushlog.conflog.rows == []   # nothing closed -- the old bug
+        flushlog._log_ended_conflicts(set(), simt=500.0)
+        assert len(flushlog.conflog.rows) == 1
