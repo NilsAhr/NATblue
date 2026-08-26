@@ -177,6 +177,16 @@ class MVP2NAT(ConflictResolution):
         #                      the manoeuvre is set by _MAX_DH_M rather than by
         #                      the geometry (BUG-04).
         self._sw_vert_hold     = True
+        #   _sw_latch_resolution  hold the last avoidance command while ASAS
+        #                      still owns the aircraft, instead of letting it
+        #                      evaporate the tick its pair leaves confpairs.
+        #                      DIAGNOSTIC, default OFF -- it changes behaviour,
+        #                      so it is opt-in until measured (see _latch).
+        self._sw_latch_resolution = False
+
+        # {callsign: (trk, tas, vs, alt)} last command computed WITH an
+        # avoidance term. Only consulted when _sw_latch_resolution is True.
+        self._last_cmd = {}
 
         # {callsign: hold altitude [m]} for aircraft whose vertical
         # requirement is met. Captured once, never moved while held -- see
@@ -201,6 +211,7 @@ class MVP2NAT(ConflictResolution):
         self._hold.clear()
         self._vs_anchor.clear()
         self._vert_hold.clear()
+        self._last_cmd.clear()
 
     def setprio(self, flag=None, priocode=''):
         '''Set the prio switch and the type of prio '''
@@ -862,7 +873,59 @@ class MVP2NAT(ConflictResolution):
                 vscapped[idx] = np.clip((h['alt'] - ownship.alt[idx]) / 60.0,
                                         -_HOLD_VS_MAX, _HOLD_VS_MAX)
 
+        if self._sw_latch_resolution:
+            newtrack, allowed_tas, vscapped, alt = self._latch(
+                conf, ownship, newtrack, allowed_tas, vscapped, alt)
+
         return newtrack, allowed_tas, vscapped, alt
+
+    def _latch(self, conf, ownship, newtrack, newtas, newvs, newalt):
+        """Hold the last real resolution while ASAS still owns the aircraft.
+
+        WHY. `ConflictDetection.update` rebuilds `confpairs` from scratch every
+        cycle, and `resolve()` accumulates avoidance ONLY for pairs currently in
+        it, starting from `dv = zeros`. An aircraft whose pair has just dropped
+        out therefore gets `dv = 0`, so `newv = v` -- it is commanded to hold
+        its present vector, and the avoidance that earned the separation
+        disappears on the very tick the separation is achieved. The geometry
+        then re-converges and the pair is re-flagged.
+
+        Measured on S05 under MVP2NAT_HDG (CD_TRACE, 2026-08-26): the pair
+        enters and leaves `confpairs` 64 times in one encounter, and on the
+        entry ticks `touthor` jumps (415 -> 586 -> 670 s) while dcpa drops --
+        the horizontal window widening and narrowing in step with the command
+        being applied and withdrawn. At full-day scale this is 53 % (vert) to
+        91 % (spd) of all logged conflict events.
+
+        This keeps the last command that was computed WITH an avoidance term,
+        for as long as `self.active` says the resolver owns the aircraft. The
+        resume-nav method still decides when to let go; the latch only stops the
+        command evaporating a tick early.
+        """
+        engaged = set()
+        for ac1, ac2 in conf.confpairs:
+            engaged.add(ac1)
+            engaged.add(ac2)
+
+        active = np.asarray(self.active, dtype=bool)
+        newtrack = np.array(newtrack, dtype=float, copy=True)
+        newtas = np.array(newtas, dtype=float, copy=True)
+        newvs = np.array(newvs, dtype=float, copy=True)
+        newalt = np.array(newalt, dtype=float, copy=True)
+
+        for idx, acid in enumerate(ownship.id):
+            if acid in engaged:
+                # A real resolution this tick: this is what gets held.
+                self._last_cmd[acid] = (newtrack[idx], newtas[idx],
+                                        newvs[idx], newalt[idx])
+            elif idx < len(active) and active[idx]:
+                held = self._last_cmd.get(acid)
+                if held is not None:
+                    newtrack[idx], newtas[idx], newvs[idx], newalt[idx] = held
+            else:
+                # Released, or never engaged: nothing to hold.
+                self._last_cmd.pop(acid, None)
+        return newtrack, newtas, newvs, newalt
 
     def MVP(self, ownship, intruder, conf, qdr, dist, tcpa, tLOS, idx1, idx2):
         """Modified Voltage Potential (MVP) resolution method"""
@@ -1309,6 +1372,39 @@ class MVP2NAT_BOTH(MVP2NAT):
 # also hold TAS and VS, and the vertical domain also holds track. Never use
 # these to make a domain claim — they exist for the before/after delta alone.
 # ─────────────────────────────────────────────────────────────────────────────
+class MVP2NAT_VERT_LATCH(MVP2NAT_VERT):
+    """MVP2NAT_VERT with the resolution latched while ASAS owns the aircraft.
+
+    Diagnostic arm for the 2026-08-26 re-detection study: does holding the last
+    avoidance command, instead of letting it evaporate the tick the pair leaves
+    confpairs, stop the detector re-flagging the pair? See MVP2NAT._latch.
+    """
+    def __init__(self):
+        super().__init__()
+        self._sw_latch_resolution = True
+
+
+class MVP2NAT_HDG_LATCH(MVP2NAT_HDG):
+    """MVP2NAT_HDG with the resolution latched. See MVP2NAT._latch."""
+    def __init__(self):
+        super().__init__()
+        self._sw_latch_resolution = True
+
+
+class MVP2NAT_SPD_LATCH(MVP2NAT_SPD):
+    """MVP2NAT_SPD with the resolution latched. See MVP2NAT._latch."""
+    def __init__(self):
+        super().__init__()
+        self._sw_latch_resolution = True
+
+
+class MVP2NAT_BOTH_LATCH(MVP2NAT_BOTH):
+    """MVP2NAT_BOTH with the resolution latched. See MVP2NAT._latch."""
+    def __init__(self):
+        super().__init__()
+        self._sw_latch_resolution = True
+
+
 class MVP2NAT_VERT_LEGACY(MVP2NAT_VERT):
     ''' MVP2NAT_VERT with pre-fix (non-isolated) channel ownership. '''
     def __init__(self):

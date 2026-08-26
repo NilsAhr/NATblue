@@ -533,3 +533,136 @@ class TestCumulativeBoundIsTheRequiredSeparation:
                                          np.array([42000.0 * FT]), anchor,
                                          max_dev=hpz_req)
         assert np.isclose((alt[0] - anchor[0]) / FT, 1050.0, atol=1.0)
+
+
+import os                                                  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# The resolution latch, and the detector trace (2026-08-26 re-detection study).
+# ---------------------------------------------------------------------------
+class _LatchConf:
+    def __init__(self, confpairs):
+        self.confpairs = confpairs
+
+
+class _LatchTraf:
+    def __init__(self, ids):
+        self.id = list(ids)
+        self.ntraf = len(ids)
+
+
+def _latcher(active):
+    """A bare MVP2NAT carrying only what _latch touches."""
+    from bluesky.traffic.asas_nat.mvp2nat import MVP2NAT
+    o = MVP2NAT.__new__(MVP2NAT)
+    o.active = np.array(active, dtype=bool)
+    o._last_cmd = {}
+    o._sw_latch_resolution = True
+    return o
+
+
+class TestResolutionLatch:
+    """`confpairs` is rebuilt from scratch each cycle and `resolve()` starts at
+    `dv = zeros`, applying avoidance only to pairs CURRENTLY in it. So the tick
+    a pair drops out, its aircraft is commanded to hold its present vector and
+    the avoidance that earned the separation disappears.
+
+    Measured on S05 under MVP2NAT_HDG: the pair enters and leaves `confpairs`
+    64 times in one encounter. The latch keeps the last command that had a real
+    avoidance term, for as long as `self.active` says ASAS owns the aircraft.
+    """
+
+    def _cmd(self):
+        return (np.array([10.0, 20.0]), np.array([200.0, 210.0]),
+                np.array([1.0, 2.0]), np.array([9000.0, 9100.0]))
+
+    def test_an_engaged_aircraft_stores_its_fresh_command(self):
+        o = _latcher([True, True])
+        traf = _LatchTraf(["A", "B"])
+        got = o._latch(_LatchConf([("A", "B")]), traf, *self._cmd())
+        assert got[0][0] == 10.0                     # returned unchanged
+        assert o._last_cmd["A"] == (10.0, 200.0, 1.0, 9000.0)
+
+    def test_a_dropped_out_but_still_active_aircraft_holds_its_last_command(self):
+        """The whole point: the pair left confpairs, so `resolve` recomputed
+        `dv = 0` and handed back the CURRENT state. The latch overrides it."""
+        o = _latcher([True, True])
+        traf = _LatchTraf(["A", "B"])
+        o._latch(_LatchConf([("A", "B")]), traf, *self._cmd())
+        # Next tick the pair is gone from confpairs and the "command" is now
+        # just the aircraft's present vector.
+        now = (np.array([99.0, 99.0]), np.array([300.0, 300.0]),
+               np.array([0.0, 0.0]), np.array([9500.0, 9500.0]))
+        got = o._latch(_LatchConf([]), traf, *now)
+        assert got[0][0] == 10.0 and got[1][0] == 200.0
+        assert got[2][0] == 1.0 and got[3][0] == 9000.0
+
+    def test_a_released_aircraft_gets_its_fresh_command_and_is_forgotten(self):
+        o = _latcher([True, True])
+        traf = _LatchTraf(["A", "B"])
+        o._latch(_LatchConf([("A", "B")]), traf, *self._cmd())
+        o.active = np.array([False, False])          # resume-nav let go
+        now = (np.array([99.0, 99.0]), np.array([300.0, 300.0]),
+               np.array([0.0, 0.0]), np.array([9500.0, 9500.0]))
+        got = o._latch(_LatchConf([]), traf, *now)
+        assert got[0][0] == 99.0                     # not held
+        assert "A" not in o._last_cmd                # and not remembered
+
+    def test_an_aircraft_that_never_engaged_is_untouched(self):
+        o = _latcher([False])
+        traf = _LatchTraf(["C"])
+        now = (np.array([5.0]), np.array([250.0]), np.array([0.0]),
+               np.array([9000.0]))
+        got = o._latch(_LatchConf([]), traf, *now)
+        assert got[0][0] == 5.0
+        assert o._last_cmd == {}
+
+    def test_the_latch_is_OFF_by_default(self):
+        """It changes behaviour, so every existing class must be unaffected
+        until an arm opts in."""
+        from bluesky.traffic.asas_nat.mvp2nat import (
+            MVP2NAT, MVP2NAT_VERT, MVP2NAT_HDG, MVP2NAT_SPD, MVP2NAT_BOTH)
+        for cls in (MVP2NAT, MVP2NAT_VERT, MVP2NAT_HDG, MVP2NAT_SPD,
+                    MVP2NAT_BOTH):
+            o = cls.__new__(cls)
+            MVP2NAT.__init__(o)
+            assert o._sw_latch_resolution is False, cls.__name__
+
+    def test_the_latched_arms_opt_in(self):
+        from bluesky.traffic.asas_nat.mvp2nat import (
+            MVP2NAT_VERT_LATCH, MVP2NAT_HDG_LATCH, MVP2NAT_SPD_LATCH,
+            MVP2NAT_BOTH_LATCH)
+        for cls in (MVP2NAT_VERT_LATCH, MVP2NAT_HDG_LATCH, MVP2NAT_SPD_LATCH,
+                    MVP2NAT_BOTH_LATCH):
+            o = cls.__new__(cls)
+            cls.__init__(o)
+            assert o._sw_latch_resolution is True, cls.__name__
+
+
+class TestDetectorTrace:
+    """The trace must EVALUATE more and DECIDE identically -- the property that
+    made FTR2NAT_TRACE safe. It enforces that itself with an assertion that its
+    reconstruction implies exactly the parent's pair list."""
+
+    def test_it_is_a_statebasedrealvs(self):
+        from bluesky.traffic.asas_nat.statebased_nat import StateBasedRealVS
+        from bluesky.traffic.asas_nat.statebased_trace import (
+            StateBasedRealVSTrace)
+        assert issubclass(StateBasedRealVSTrace, StateBasedRealVS)
+
+    def test_it_writes_nothing_when_the_env_var_is_unset(self, monkeypatch):
+        monkeypatch.delenv("CD_TRACE", raising=False)
+        from bluesky.traffic.asas_nat.statebased_trace import (
+            StateBasedRealVSTrace)
+        o = StateBasedRealVSTrace.__new__(StateBasedRealVSTrace)
+        o._trace_path = ""
+        o._fh = None
+        assert o._handle() is None
+
+    def test_it_refuses_full_day_traffic(self, monkeypatch):
+        """One row per ordered pair per tick: fine for 2-6 aircraft, ruinous
+        for 1436."""
+        from bluesky.traffic.asas_nat.statebased_trace import (
+            StateBasedRealVSTrace)
+        assert int(os.environ.get("CD_TRACE_MAX_NTRAF", "12")) <= 20

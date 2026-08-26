@@ -26,4 +26,5 @@ from .mvp_nat import MVPNAT
 from .mvp2nat import (MVP2NAT, MVP2NAT_HYBRID3_FLHOLD,
                       MVP2NAT_HYBRID3_FREEZE, MVP2NAT_HYBRID3_FREEZE_NOSPD)
 from .statebased_nat import StateBasedNAT, StateBasedRealVS
+from .statebased_trace import StateBasedRealVSTrace
 from .intentbased import IntentBasedNAT
