@@ -71,13 +71,13 @@ class StateBased(ConflictDetection):
 
         dvs = ownship.vs.reshape(1, ownship.ntraf) - \
             intruder.vs.reshape(1, ownship.ntraf).T
+        dvs = np.where(np.abs(dvs) < 1e-6, 1e-6, dvs)  # prevent division by zero
 
         # Check for passing through each others zone
         # hPZ can differ per aircraft, get the largest value per aircraft pair
         hpz = np.asarray(np.maximum(np.asmatrix(hpz), np.asmatrix(hpz).transpose()))
-        with np.errstate(divide='ignore', invalid='ignore'): # prevent division by zero
-            tcrosshi = (dalt + hpz) / -dvs
-            tcrosslo = (dalt - hpz) / -dvs
+        tcrosshi = (dalt + hpz) / -dvs
+        tcrosslo = (dalt - hpz) / -dvs
         tinver = np.minimum(tcrosshi, tcrosslo)
         toutver = np.maximum(tcrosshi, tcrosslo)
 
@@ -100,27 +100,9 @@ class StateBased(ConflictDetection):
         swlos = (dist < rpz) * (np.abs(dalt) < hpz)
         lospairs = [(ownship.id[i], ownship.id[j]) for i, j in zip(*np.where(swlos))]
 
-        # ------------------------------------------------------------------
-        # Minimum vertical distance during conflict window [tinconf, toutconf]
-        # ------------------------------------------------------------------
-        with np.errstate(invalid='ignore', over='ignore'):
-            dalt_entry = dalt + dvs * tinconf
-            dalt_exit  = dalt + dvs * toutconf
-
-        # Time when vertical separation is zero (if within the window)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            t_cross = -dalt / dvs
-        cross_in_window = (t_cross >= tinconf) & (t_cross <= toutconf)
-
-        min_dalt = np.where(
-            cross_in_window,
-            0.0,
-            np.minimum(np.abs(dalt_entry), np.abs(dalt_exit))
-        )
-
         return confpairs, lospairs, inconf, tcpamax, \
             qdr[swconfl], dist[swconfl], np.sqrt(dcpa2[swconfl]), \
-                tcpa[swconfl], tinconf[swconfl], min_dalt[swconfl]
+                tcpa[swconfl], tinconf[swconfl]
 
 
 try:
@@ -134,4 +116,3 @@ try:
 
 except ImportError:
     pass
-

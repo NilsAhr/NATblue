@@ -36,7 +36,6 @@ class ConflictDetection(Entity, replaceable=True):
         self.dcpa = np.array([])
         self.tcpa = np.array([])
         self.tLOS = np.array([])
-        self.min_dalt_conf = np.array([])  # Minimum vertical distance during conflict
         # Unique conflicts and LoS in the current timestep (a, b) = (b, a)
         self.confpairs_unique = set()
         self.lospairs_unique = set()
@@ -68,7 +67,6 @@ class ConflictDetection(Entity, replaceable=True):
         self.dcpa = np.array([])
         self.tcpa = np.array([])
         self.tLOS = np.array([])
-        self.min_dalt_conf = np.array([])
         self.inconf = np.zeros(bs.traf.ntraf)
         self.tcpamax = np.zeros(bs.traf.ntraf)
 
@@ -211,7 +209,7 @@ class ConflictDetection(Entity, replaceable=True):
     def update(self, ownship, intruder):
         ''' Perform an update step of the Conflict Detection implementation. '''
         self.confpairs, self.lospairs, self.inconf, self.tcpamax, self.qdr, \
-            self.dist, self.dcpa, self.tcpa, self.tLOS, self.dalt = \
+            self.dist, self.dcpa, self.tcpa, self.tLOS = \
                 self.detect(ownship, intruder, self.rpz, self.hpz, self.dtlookahead)
 
         # confpairs has conflicts observed from both sides (a, b) and (b, a)
@@ -241,5 +239,4 @@ class ConflictDetection(Entity, replaceable=True):
         dcpa = np.array([])
         tcpa = np.array([])
         tLOS = np.array([])
-        dalt = np.array([])
-        return confpairs, lospairs, inconf, tcpamax, qdr, dist, dcpa, tcpa, tLOS, dalt
+        return confpairs, lospairs, inconf, tcpamax, qdr, dist, dcpa, tcpa, tLOS

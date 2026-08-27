@@ -11,4 +11,3 @@ from .windsim import WindSim
 
 # NAT-specific ASAS extensions (registers MVPNAT, StateBasedNAT with
 # the replaceable Entity mechanism so they appear in RESO / CDMETHOD)
-from . import asas_nat  
